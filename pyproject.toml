@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lyzr-cloudrift"
+version = "0.1.0"
+description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, and pub/sub"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+keywords = [
+    "cloud", "aws", "azure", "s3", "blob", "sqs", "servicebus",
+    "documentdb", "cosmosdb", "redis", "elasticache", "cache",
+    "secrets", "keyvault", "sns", "eventgrid", "pubsub",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Libraries",
+    "Intended Audience :: Developers",
+]
+dependencies = []
+
+[project.optional-dependencies]
+aws = [
+    "aioboto3>=13.0.0",       # native async S3 / SQS / SNS / Secrets Manager
+    "motor>=3.3.0",           # async MongoDB driver for DocumentDB
+    "redis[hiredis]>=5.0.0",  # ElastiCache (also used by standalone)
+]
+azure = [
+    "azure-storage-blob>=12.19.0",
+    "azure-servicebus>=7.11.0",
+    "azure-cosmos>=4.7.0",
+    "azure-identity>=1.15.0",
+    "azure-keyvault-secrets>=4.7.0",
+    "azure-eventgrid>=4.9.0",
+    "motor>=3.3.0",           # for Cosmos MongoDB API (optional)
+    "redis[hiredis]>=5.0.0",  # Azure Cache for Redis
+]
+cache = [
+    "redis[hiredis]>=5.0.0",
+]
+all = [
+    "aioboto3>=13.0.0",
+    "motor>=3.3.0",
+    "azure-storage-blob>=12.19.0",
+    "azure-servicebus>=7.11.0",
+    "azure-cosmos>=4.7.0",
+    "azure-identity>=1.15.0",
+    "azure-keyvault-secrets>=4.7.0",
+    "azure-eventgrid>=4.9.0",
+    "redis[hiredis]>=5.0.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "moto[s3,sqs,sns,secretsmanager,server]>=5.0",
+    "aioboto3>=13.0.0",
+    "mongomock-motor>=0.0.21",
+    "fakeredis>=2.20.0",
+    "httpx>=0.25.0",
+    "ruff>=0.4.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["cloudrift"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[dependency-groups]
+dev = [
+    "fakeredis>=2.35.1",
+]
