@@ -27,8 +27,25 @@ class CacheBackend(ABC):
         """Return ``True`` if *key* exists."""
 
     @abstractmethod
-    async def expire(self, key: str, seconds: int) -> bool:
-        """Set a timeout on *key*. Returns ``True`` if the timeout was set."""
+    async def expire(
+        self,
+        key: str,
+        seconds: int,
+        nx: bool = False,
+        xx: bool = False,
+    ) -> bool:
+        """Set a timeout on *key*. Returns ``True`` if the timeout was set.
+
+        Args:
+            key: Target key.
+            seconds: TTL in seconds.
+            nx: Only set the TTL if the key has no existing TTL.
+            xx: Only set the TTL if the key already has a TTL.
+
+        ``nx`` and ``xx`` are mutually exclusive. Backends that don't support
+        these flags natively should emulate them via ``ttl(key)`` and document
+        that the operation is not atomic.
+        """
 
     @abstractmethod
     async def ttl(self, key: str) -> int:
@@ -53,6 +70,31 @@ class CacheBackend(ABC):
     @abstractmethod
     async def hdel(self, key: str, *fields: str) -> int:
         """Delete fields from the hash at *key*. Returns number of fields removed."""
+
+    @abstractmethod
+    async def sadd(self, key: str, *members: bytes | str) -> int:
+        """Add one or more *members* to the set at *key*.
+
+        Returns the number of members that were newly added (i.e. not already
+        present). This "was-new" signal is the foundation of unique-element
+        deduplication patterns (e.g. DAU/MAU tracking).
+        """
+
+    @abstractmethod
+    async def srem(self, key: str, *members: bytes | str) -> int:
+        """Remove one or more *members* from the set at *key*. Returns the number removed."""
+
+    @abstractmethod
+    async def scard(self, key: str) -> int:
+        """Return the number of elements in the set at *key*."""
+
+    @abstractmethod
+    async def sismember(self, key: str, member: bytes | str) -> bool:
+        """Return ``True`` if *member* is in the set at *key*."""
+
+    @abstractmethod
+    async def smembers(self, key: str) -> "set[bytes]":
+        """Return all members of the set at *key*."""
 
     @abstractmethod
     async def lpush(self, key: str, *values: bytes | str) -> int:
@@ -102,6 +144,28 @@ class CacheBackend(ABC):
         """Atomic set-with-TTL. Default delegates to ``set(key, value, ttl=ttl)``."""
         await self.set(key, value, ttl=ttl)
 
+    @asynccontextmanager
+    async def pipeline(self):
+        """Batch multiple commands.
+
+        Usage:
+            async with cache.pipeline() as pipe:
+                pipe.sadd("k", "m")
+                pipe.expire("k", 60)
+            # commands execute on context exit; results available via
+            # ``await pipe.execute()`` if called explicitly inside the block.
+
+        The default implementation queues calls and replays them sequentially
+        on exit — it provides no atomicity and no round-trip savings. Redis
+        backends override this with a true server-side pipeline. Callers that
+        depend on atomicity or batching performance must check the backend.
+        """
+        pipe = _SequentialPipeline(self)
+        try:
+            yield pipe
+        finally:
+            await pipe.execute()
+
     async def health_check(self) -> bool:
         """Return True if the cache server is reachable."""
         try:
@@ -114,6 +178,33 @@ class CacheBackend(ABC):
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
+
+
+class _SequentialPipeline:
+    """Default pipeline that records calls and replays them sequentially on execute.
+
+    Provides no atomicity and no round-trip savings — exists so the
+    ``pipeline()`` API works on every backend. Redis backends bypass this with
+    a true server-side pipeline.
+    """
+
+    def __init__(self, backend: "CacheBackend") -> None:
+        self._backend = backend
+        self._ops: list[tuple[str, tuple, dict]] = []
+
+    def __getattr__(self, name: str):
+        def queue(*args, **kwargs):
+            self._ops.append((name, args, kwargs))
+            return self
+        return queue
+
+    async def execute(self) -> list:
+        results = []
+        ops, self._ops = self._ops, []
+        for name, args, kwargs in ops:
+            method = getattr(self._backend, name)
+            results.append(await method(*args, **kwargs))
+        return results
 
 
 class _RedisMixin:
@@ -148,9 +239,47 @@ class _RedisMixin:
         except RedisError as e:
             raise CacheError(str(e)) from e
 
-    async def expire(self, key: str, seconds: int) -> bool:
+    async def expire(
+        self,
+        key: str,
+        seconds: int,
+        nx: bool = False,
+        xx: bool = False,
+    ) -> bool:
+        if nx and xx:
+            raise ValueError("expire() flags `nx` and `xx` are mutually exclusive")
         try:
-            return bool(await self._client.expire(key, seconds))
+            return bool(await self._client.expire(key, seconds, nx=nx, xx=xx))
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+    async def sadd(self, key: str, *members: bytes | str) -> int:
+        try:
+            return await self._client.sadd(key, *members)
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+    async def srem(self, key: str, *members: bytes | str) -> int:
+        try:
+            return await self._client.srem(key, *members)
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+    async def scard(self, key: str) -> int:
+        try:
+            return await self._client.scard(key)
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+    async def sismember(self, key: str, member: bytes | str) -> bool:
+        try:
+            return bool(await self._client.sismember(key, member))
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+    async def smembers(self, key: str) -> "set[bytes]":
+        try:
+            return await self._client.smembers(key)
         except RedisError as e:
             raise CacheError(str(e)) from e
 
