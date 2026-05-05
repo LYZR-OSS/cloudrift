@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lyzr-cloudrift"
-version = "0.1.2"
+version = "0.2.0"
 description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, and pub/sub"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,11 +33,10 @@ aws = [
 azure = [
     "azure-storage-blob>=12.19.0",
     "azure-servicebus>=7.11.0",
-    "azure-cosmos>=4.7.0",
     "azure-identity>=1.15.0",
     "azure-keyvault-secrets>=4.7.0",
     "azure-eventgrid>=4.9.0",
-    "motor>=3.3.0",           # for Cosmos MongoDB API (optional)
+    "motor>=3.3.0",           # Cosmos DB via MongoDB API
     "redis[hiredis]>=5.0.0",  # Azure Cache for Redis
 ]
 cache = [
@@ -48,7 +47,6 @@ all = [
     "motor>=3.3.0",
     "azure-storage-blob>=12.19.0",
     "azure-servicebus>=7.11.0",
-    "azure-cosmos>=4.7.0",
     "azure-identity>=1.15.0",
     "azure-keyvault-secrets>=4.7.0",
     "azure-eventgrid>=4.9.0",
@@ -59,7 +57,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "moto[s3,sqs,sns,secretsmanager,server]>=5.0",
     "aioboto3>=13.0.0",
-    "mongomock-motor>=0.0.21",
+    "motor>=3.3.0",
     "fakeredis>=2.20.0",
     "httpx>=0.25.0",
     "ruff>=0.4.0",
