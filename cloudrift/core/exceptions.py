@@ -29,20 +29,8 @@ class MessageSendError(MessagingError):
 
 
 # Document DB exceptions
-class DocumentError(CloudRiftError):
-    """Base exception for document database operations."""
-
-
-class DocumentNotFoundError(DocumentError):
-    """Raised when the requested document does not exist."""
-
-
-class CollectionError(DocumentError):
-    """Raised on collection-level errors."""
-
-
-class DocumentConnectionError(DocumentError):
-    """Raised when a database connection cannot be established."""
+class DocumentConnectionError(CloudRiftError):
+    """Raised when a document database connection cannot be established."""
 
 
 # Cache exceptions

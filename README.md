@@ -10,7 +10,7 @@ Cloud-agnostic abstraction for **storage**, **messaging**, **document databases*
 |---|---|---|---|
 | Storage | S3 | Blob Storage | — |
 | Messaging | SQS | Service Bus | — |
-| Document DB | DocumentDB | Cosmos DB (Core/SQL) | — |
+| Document DB | DocumentDB | Cosmos DB (MongoDB API) | — |
 | Cache | ElastiCache | Azure Cache for Redis | Redis |
 
 ---
@@ -157,39 +157,56 @@ await queue.close()
 
 ## Document Database
 
+`get_mongodb(...)` returns a configured [Motor](https://motor.readthedocs.io/)
+`AsyncIOMotorClient`. Both providers speak the MongoDB wire protocol — AWS
+DocumentDB natively, Azure Cosmos via its MongoDB-API endpoint — so the caller
+uses Motor's API directly:
+
 ```python
 from cloudrift.document import get_mongodb
 
 # AWS DocumentDB (MongoDB-compatible)
-db = get_mongodb(
+client = get_mongodb(
     "documentdb",
     uri="mongodb://user:pass@cluster.docdb.amazonaws.com:27017/?tls=true",
-    database="lyzr",
     tls_ca_file="/etc/ssl/rds-ca-bundle.pem",
     max_pool_size=200,
 )
 
-# Azure Cosmos DB (Core/SQL API)
-cdb = get_mongodb("cosmos", connection_string="...", database="lyzr")
-cdb = get_mongodb("cosmos", url="https://acct.documents.azure.com:443/",
-                      account_key="...", database="lyzr")
+# Azure Cosmos DB (MongoDB API)
+client = get_mongodb("cosmos", connection_string="mongodb://...")
+client = get_mongodb("cosmos", account="myacct", account_key="...")
 ```
 
-**Operations** (MongoDB-style on both):
+**Operations** — full Motor / pymongo surface, no wrappers:
 
 ```python
-doc_id = await db.insert_one("users", {"name": "Alice", "age": 30})
-ids = await db.insert_many("events", [{"v": 1}, {"v": 2}])
+db = client["lyzr"]
+users = db["users"]
 
-doc = await db.find_one("users", {"name": "Alice"})
-docs = await db.find("events", {"v": {"$gte": 1}}, limit=100, skip=0)
+result = await users.insert_one({"name": "Alice", "age": 30})
+doc_id = result.inserted_id
 
-modified = await db.update_one("users", {"_id": doc_id}, {"$set": {"age": 31}})
-deleted = await db.delete_many("events", {"v": 1})
-total = await db.count("users", {"age": {"$gte": 18}})
+doc = await users.find_one({"name": "Alice"})
+async for u in users.find({"age": {"$gte": 18}}).skip(0).limit(100):
+    ...
 
-await db.close()
+await users.update_one({"_id": doc_id}, {"$set": {"age": 31}})
+await db["events"].delete_many({"v": 1})
+total = await users.count_documents({"age": {"$gte": 18}})
+
+# bulk writes, aggregations, change streams, transactions, GridFS — all
+# of Motor is available; nothing is hidden behind a wrapper.
+
+client.close()
 ```
+
+> **Cosmos auth note.** Cosmos for MongoDB (RU) is keys-only at the wire
+> protocol layer — Azure AD tokens are not accepted. Use the connection
+> string from the portal or the account name + account key. Earlier
+> versions of cloudrift exposed managed-identity / service-principal
+> factories for Cosmos that called the SQL API; those have been removed
+> in favour of a single Motor-based path.
 
 ---
 
@@ -250,8 +267,8 @@ Pool sizes are configurable per backend:
 get_storage("s3", bucket="b", region="us-east-1",
             max_pool_connections=100, connect_timeout=5.0, read_timeout=30.0)
 
-get_mongodb("documentdb", uri="...", database="db",
-                max_pool_size=200, min_pool_size=10)
+get_mongodb("documentdb", uri="...",
+            max_pool_size=200, min_pool_size=10)
 ```
 
 Always release sockets on shutdown with `await backend.close()` — or wrap the whole lifetime in `async with`.
@@ -266,7 +283,7 @@ All backends raise from a single hierarchy under `cloudrift.core.exceptions`:
 from cloudrift.core.exceptions import (
     ObjectNotFoundError, StoragePermissionError, StorageError,
     QueueNotFoundError, MessageSendError, MessagingError,
-    DocumentNotFoundError, DocumentConnectionError, DocumentError,
+    DocumentConnectionError,
     CacheKeyNotFoundError, CacheConnectionError, CacheError,
 )
 
@@ -276,17 +293,17 @@ except ObjectNotFoundError:
     ...
 ```
 
-Provider-specific exceptions (e.g. `botocore.ClientError`, `azure.core.exceptions.HttpResponseError`) are translated to the cloudrift hierarchy at the boundary.
+Provider-specific exceptions (e.g. `botocore.ClientError`, `azure.core.exceptions.HttpResponseError`) are translated to the cloudrift hierarchy at the boundary. The document layer is the exception: `get_mongodb(...)` returns a Motor client and any operation errors propagate as native pymongo exceptions (e.g. `pymongo.errors.OperationFailure`, `DuplicateKeyError`). Connect-time failures still surface as `DocumentConnectionError`.
 
 ---
 
 ## Testing
 
-The dev extra ships moto + a Motor mock so unit tests don't need real cloud credentials:
+The dev extra ships moto and fakeredis so unit tests don't need real cloud credentials:
 
 ```bash
 pip install "cloudrift[dev]"
 pytest
 ```
 
-For local integration testing of the AWS backends, the suite uses `ThreadedMotoServer` (LocalStack-style in-process mock) — see `tests/test_storage.py` for the pattern. Azure backends are tested against Azurite / Service Bus / Cosmos emulators (configure endpoint via the relevant `*_url` kwarg).
+For local integration testing of the AWS backends, the suite uses `ThreadedMotoServer` (LocalStack-style in-process mock) — see `tests/test_storage.py` for the pattern. Azure backends are tested against Azurite / Service Bus emulators (configure endpoint via the relevant `*_url` kwarg). For DocumentDB and Cosmos (MongoDB API), `tests/test_document.py` covers connection construction; for live integration smoke tests, see `scripts/test_cosmos_*.py`.

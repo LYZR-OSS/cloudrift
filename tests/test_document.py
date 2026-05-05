@@ -1,122 +1,197 @@
 import pytest
-from mongomock_motor import AsyncMongoMockClient
+from motor.motor_asyncio import AsyncIOMotorClient
 
+from cloudrift.core.exceptions import DocumentConnectionError
 from cloudrift.document import get_mongodb
-from cloudrift.document.documentdb import AWSDocumentDBBackend
+
+
+class _RecordingClient:
+    """Stand-in for AsyncIOMotorClient that records constructor args."""
+
+    instances: list["_RecordingClient"] = []
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        _RecordingClient.instances.append(self)
+
+    def close(self):
+        pass
 
 
 @pytest.fixture
-def docdb(monkeypatch):
-    """Patch AsyncIOMotorClient with mongomock_motor for unit tests."""
-    import cloudrift.document.documentdb as mod
+def recorder(monkeypatch):
+    _RecordingClient.instances.clear()
+    import cloudrift.document.cosmos as cosmos_mod
+    import cloudrift.document.documentdb as docdb_mod
 
-    monkeypatch.setattr(mod, "AsyncIOMotorClient", AsyncMongoMockClient)
-    backend = get_mongodb("documentdb", uri="mongodb://localhost:27017", database="testdb")
-    return backend
-
-
-@pytest.mark.asyncio
-async def test_insert_and_find_one(docdb):
-    doc_id = await docdb.insert_one("users", {"name": "Alice", "age": 30})
-    assert isinstance(doc_id, str)
-
-    found = await docdb.find_one("users", {"name": "Alice"})
-    assert found is not None
-    assert found["name"] == "Alice"
-    assert found["age"] == 30
+    monkeypatch.setattr(docdb_mod, "AsyncIOMotorClient", _RecordingClient)
+    monkeypatch.setattr(cosmos_mod, "AsyncIOMotorClient", _RecordingClient)
+    return _RecordingClient
 
 
-@pytest.mark.asyncio
-async def test_insert_many(docdb):
-    ids = await docdb.insert_many("items", [{"v": 1}, {"v": 2}, {"v": 3}])
-    assert len(ids) == 3
+def test_documentdb_uri_returns_motor_client():
+    # Real Motor client (no recorder) — verifies the dispatch returns the right type.
+    client = get_mongodb(
+        "documentdb",
+        uri="mongodb://localhost:27017/",
+        max_pool_size=50,
+        min_pool_size=5,
+    )
+    assert isinstance(client, AsyncIOMotorClient)
+    client.close()
 
 
-@pytest.mark.asyncio
-async def test_find_with_limit(docdb):
-    for i in range(5):
-        await docdb.insert_one("logs", {"i": i})
-    results = await docdb.find("logs", {}, limit=3)
-    assert len(results) == 3
+def test_documentdb_uri_passes_pool_kwargs(recorder):
+    get_mongodb(
+        "documentdb",
+        uri="mongodb://h:27017/",
+        max_pool_size=200,
+        min_pool_size=10,
+        tls_ca_file="/etc/ssl/ca.pem",
+    )
+    inst = recorder.instances[-1]
+    assert inst.args == ("mongodb://h:27017/",)
+    assert inst.kwargs["maxPoolSize"] == 200
+    assert inst.kwargs["minPoolSize"] == 10
+    assert inst.kwargs["tlsCAFile"] == "/etc/ssl/ca.pem"
 
 
-@pytest.mark.asyncio
-async def test_update_one(docdb):
-    await docdb.insert_one("products", {"sku": "ABC", "price": 10})
-    modified = await docdb.update_one("products", {"sku": "ABC"}, {"$set": {"price": 20}})
-    assert modified == 1
-    doc = await docdb.find_one("products", {"sku": "ABC"})
-    assert doc["price"] == 20
+def test_documentdb_credentials_url_encodes_password(recorder):
+    get_mongodb(
+        "documentdb",
+        host="cluster.docdb.amazonaws.com",
+        port=27017,
+        username="admin",
+        password="p@ss/word",
+        tls=True,
+    )
+    inst = recorder.instances[-1]
+    uri = inst.args[0]
+    # raw '@' / '/' in the password would corrupt the URI; quote_plus encodes them
+    assert "p%40ss%2Fword" in uri
+    assert uri.startswith("mongodb://admin:")
+    assert "cluster.docdb.amazonaws.com:27017" in uri
+    assert inst.kwargs["tls"] is True
 
 
-@pytest.mark.asyncio
-async def test_delete_one(docdb):
-    await docdb.insert_one("temp", {"key": "to_delete"})
-    deleted = await docdb.delete_one("temp", {"key": "to_delete"})
-    assert deleted == 1
-    result = await docdb.find_one("temp", {"key": "to_delete"})
-    assert result is None
+def test_documentdb_tls_cert_passes_cert_path(recorder):
+    get_mongodb(
+        "documentdb",
+        host="cluster.docdb.amazonaws.com",
+        port=27017,
+        username="admin",
+        password="pw",
+        tls_cert_key_file="/secrets/client.pem",
+        tls_ca_file="/secrets/ca.pem",
+    )
+    inst = recorder.instances[-1]
+    assert inst.kwargs["tls"] is True
+    assert inst.kwargs["tlsCertificateKeyFile"] == "/secrets/client.pem"
+    assert inst.kwargs["tlsCAFile"] == "/secrets/ca.pem"
 
 
-@pytest.mark.asyncio
-async def test_count(docdb):
-    for _ in range(4):
-        await docdb.insert_one("counters", {"x": 1})
-    total = await docdb.count("counters", {"x": 1})
-    assert total == 4
+def test_cosmos_account_key_builds_mongo_uri(recorder):
+    get_mongodb("cosmos", account="myacct", account_key="raw+key/with=special")
+    inst = recorder.instances[-1]
+    uri = inst.args[0]
+    assert uri.startswith("mongodb://myacct:")
+    assert "myacct.mongo.cosmos.azure.com:10255" in uri
+    assert "ssl=true" in uri
+    assert "replicaSet=globaldb" in uri
+    assert "retryWrites=false" in uri
+    # the '+' / '/' / '=' in the key must be URL-encoded
+    assert "raw%2Bkey%2Fwith%3Dspecial" in uri
 
 
-@pytest.mark.asyncio
-async def test_find_one_missing_returns_none(docdb):
-    result = await docdb.find_one("empty_col", {"id": "does-not-exist"})
-    assert result is None
+def test_cosmos_connection_string_passed_through(recorder):
+    cs = "mongodb://acct:key@acct.mongo.cosmos.azure.com:10255/?ssl=true"
+    get_mongodb("cosmos", connection_string=cs)
+    inst = recorder.instances[-1]
+    assert inst.args == (cs,)
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected_max,expected_min",
+    [
+        # defaults
+        ({"uri": "mongodb://h/"}, 100, 0),
+        ({"host": "h", "port": 27017, "username": "u", "password": "p"}, 100, 0),
+        (
+            {
+                "host": "h", "port": 27017, "username": "u", "password": "p",
+                "tls_cert_key_file": "/c.pem",
+            },
+            100, 0,
+        ),
+        # explicit
+        ({"uri": "mongodb://h/", "max_pool_size": 250, "min_pool_size": 25}, 250, 25),
+        (
+            {"host": "h", "port": 27017, "username": "u", "password": "p",
+             "max_pool_size": 250, "min_pool_size": 25},
+            250, 25,
+        ),
+        (
+            {"host": "h", "port": 27017, "username": "u", "password": "p",
+             "tls_cert_key_file": "/c.pem",
+             "max_pool_size": 250, "min_pool_size": 25},
+            250, 25,
+        ),
+    ],
+)
+def test_documentdb_pool_kwargs_standardized(recorder, kwargs, expected_max, expected_min):
+    get_mongodb("documentdb", **kwargs)
+    inst = recorder.instances[-1]
+    assert inst.kwargs["maxPoolSize"] == expected_max
+    assert inst.kwargs["minPoolSize"] == expected_min
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected_max,expected_min",
+    [
+        ({"connection_string": "mongodb://h/"}, 100, 0),
+        ({"account": "a", "account_key": "k"}, 100, 0),
+        (
+            {"connection_string": "mongodb://h/",
+             "max_pool_size": 250, "min_pool_size": 25},
+            250, 25,
+        ),
+        (
+            {"account": "a", "account_key": "k",
+             "max_pool_size": 250, "min_pool_size": 25},
+            250, 25,
+        ),
+    ],
+)
+def test_cosmos_pool_kwargs_standardized(recorder, kwargs, expected_max, expected_min):
+    get_mongodb("cosmos", **kwargs)
+    inst = recorder.instances[-1]
+    assert inst.kwargs["maxPoolSize"] == expected_max
+    assert inst.kwargs["minPoolSize"] == expected_min
 
 
 def test_invalid_provider():
     with pytest.raises(ValueError, match="Unknown document DB provider"):
-        get_mongodb("dynamodb", uri="x", database="y")
+        get_mongodb("dynamodb", uri="x")
 
 
-# --- New tests for P0/P1 features ---
+def test_documentdb_connect_failure_wrapped(monkeypatch):
+    import cloudrift.document.documentdb as mod
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("bad uri")
+
+    monkeypatch.setattr(mod, "AsyncIOMotorClient", boom)
+    with pytest.raises(DocumentConnectionError, match="Failed to connect to DocumentDB"):
+        get_mongodb("documentdb", uri="mongodb://broken")
 
 
-@pytest.mark.asyncio
-async def test_find_iter(docdb):
-    for i in range(5):
-        await docdb.insert_one("stream_col", {"val": i})
-    docs = []
-    async for doc in docdb.find_iter("stream_col", {}):
-        docs.append(doc)
-    assert len(docs) == 5
+def test_cosmos_connect_failure_wrapped(monkeypatch):
+    import cloudrift.document.cosmos as mod
 
+    def boom(*args, **kwargs):
+        raise RuntimeError("bad key")
 
-@pytest.mark.asyncio
-async def test_create_index(docdb):
-    index_name = await docdb.create_index("indexed_col", [("name", 1)], unique=True)
-    assert isinstance(index_name, str)
-
-
-@pytest.mark.asyncio
-async def test_aggregate(docdb):
-    await docdb.insert_many("agg_col", [{"status": "a"}, {"status": "b"}, {"status": "a"}])
-    results = await docdb.aggregate("agg_col", [{"$match": {"status": "a"}}])
-    assert len(results) == 2
-    assert all(r["status"] == "a" for r in results)
-
-
-@pytest.mark.asyncio
-async def test_upsert_one_insert(docdb):
-    doc_id = await docdb.upsert_one("upsert_col", {"key": "new"}, {"$set": {"value": 42}})
-    assert isinstance(doc_id, str)
-    found = await docdb.find_one("upsert_col", {"key": "new"})
-    assert found is not None
-    assert found["value"] == 42
-
-
-@pytest.mark.asyncio
-async def test_upsert_one_update(docdb):
-    await docdb.insert_one("upsert_col2", {"key": "existing", "value": 1})
-    doc_id = await docdb.upsert_one("upsert_col2", {"key": "existing"}, {"$set": {"value": 99}})
-    assert isinstance(doc_id, str)
-    found = await docdb.find_one("upsert_col2", {"key": "existing"})
-    assert found["value"] == 99
+    monkeypatch.setattr(mod, "AsyncIOMotorClient", boom)
+    with pytest.raises(DocumentConnectionError, match="Failed to connect to Cosmos DB"):
+        get_mongodb("cosmos", account="a", account_key="k")
