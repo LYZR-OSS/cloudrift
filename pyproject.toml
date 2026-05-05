@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lyzr-cloudrift"
-version = "0.1.1"
+version = "0.1.2"
 description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, and pub/sub"
 readme = "README.md"
 requires-python = ">=3.11"
