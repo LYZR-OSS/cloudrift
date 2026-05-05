@@ -8,12 +8,16 @@ from cloudrift.core.exceptions import ObjectNotFoundError, StorageError, Storage
 from cloudrift.storage.base import StorageBackend
 
 
-class AzureBlobBackend(StorageBackend):
-    """Azure Blob Storage backend (native async via ``azure.storage.blob.aio``).
+class AzureBlobClient:
+    """Account-scoped Azure Blob client.
 
-    A single ``BlobServiceClient`` is held for the lifetime of the backend and
-    reused across all operations. Call ``await backend.close()`` (or use
-    ``async with backend:``) to release the underlying connections.
+    Owns one ``BlobServiceClient`` for the lifetime of the client. The same
+    service client serves every container in the storage account, so callers
+    using multiple containers share a single connection.
+
+    Use ``client.container(name)`` to get a per-container
+    :class:`StorageBackend` handle. Call ``await client.close()`` (or
+    ``async with client:``) once when you're done.
 
     Use one of the class methods to construct:
     - ``from_connection_string`` — shared-access connection string
@@ -26,12 +30,10 @@ class AzureBlobBackend(StorageBackend):
     def __init__(
         self,
         service_client: BlobServiceClient,
-        container: str,
         *,
         account_key: str | None = None,
         credential=None,
     ) -> None:
-        self.container = container
         self._service = service_client
         self._account_key = account_key
         self._credential = credential
@@ -41,47 +43,33 @@ class AzureBlobBackend(StorageBackend):
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_connection_string(cls, connection_string: str, container: str) -> "AzureBlobBackend":
+    def from_connection_string(cls, connection_string: str) -> "AzureBlobClient":
         """Authenticate with an Azure Storage connection string."""
-        # Parse account key from the connection string so presigned_url works.
         account_key = _parse_conn_string_field(connection_string, "AccountKey")
         return cls(
             BlobServiceClient.from_connection_string(connection_string),
-            container,
             account_key=account_key,
         )
 
     @classmethod
-    def from_account_key(
-        cls,
-        account_url: str,
-        account_key: str,
-        container: str,
-    ) -> "AzureBlobBackend":
+    def from_account_key(cls, account_url: str, account_key: str) -> "AzureBlobClient":
         """Authenticate with a storage account URL and account key."""
         return cls(
             BlobServiceClient(account_url, credential=account_key),
-            container,
             account_key=account_key,
         )
 
     @classmethod
-    def from_sas_token(
-        cls,
-        account_url: str,
-        sas_token: str,
-        container: str,
-    ) -> "AzureBlobBackend":
+    def from_sas_token(cls, account_url: str, sas_token: str) -> "AzureBlobClient":
         """Authenticate with a Shared Access Signature (SAS) token."""
-        return cls(BlobServiceClient(account_url, credential=sas_token), container)
+        return cls(BlobServiceClient(account_url, credential=sas_token))
 
     @classmethod
     def from_managed_identity(
         cls,
         account_url: str,
-        container: str,
         client_id: str | None = None,
-    ) -> "AzureBlobBackend":
+    ) -> "AzureBlobClient":
         """Authenticate via Azure Managed Identity (system or user-assigned)."""
         from azure.identity.aio import ManagedIdentityCredential
 
@@ -92,7 +80,6 @@ class AzureBlobBackend(StorageBackend):
         )
         return cls(
             BlobServiceClient(account_url, credential=credential),
-            container,
             credential=credential,
         )
 
@@ -103,8 +90,7 @@ class AzureBlobBackend(StorageBackend):
         tenant_id: str,
         client_id: str,
         client_secret: str,
-        container: str,
-    ) -> "AzureBlobBackend":
+    ) -> "AzureBlobClient":
         """Authenticate via Azure AD service principal (client secret)."""
         from azure.identity.aio import ClientSecretCredential
 
@@ -113,9 +99,20 @@ class AzureBlobBackend(StorageBackend):
         )
         return cls(
             BlobServiceClient(account_url, credential=credential),
-            container,
             credential=credential,
         )
+
+    # ------------------------------------------------------------------
+    # Container view factory
+    # ------------------------------------------------------------------
+
+    def container(self, name: str) -> "AzureBlobBackend":
+        """Return a :class:`StorageBackend` view bound to ``name``.
+
+        The view shares this client's connection. ``await view.close()`` is a
+        no-op — call ``await client.close()`` to release resources.
+        """
+        return AzureBlobBackend(name, self)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -125,6 +122,106 @@ class AzureBlobBackend(StorageBackend):
         await self._service.close()
         if self._credential is not None and hasattr(self._credential, "close"):
             await self._credential.close()
+
+    async def __aenter__(self) -> "AzureBlobClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+
+class AzureBlobBackend(StorageBackend):
+    """Per-container :class:`StorageBackend` view over an :class:`AzureBlobClient`.
+
+    Holds only ``(client, container)`` — all I/O delegates to the shared
+    service client. ``close()`` is a no-op for views obtained from
+    ``client.container(...)``; the account client owns lifecycle.
+
+    Views obtained from :func:`cloudrift.storage.get_storage` own their
+    underlying client and *do* tear it down on ``close()``.
+    """
+
+    def __init__(
+        self,
+        container: str,
+        client: AzureBlobClient,
+        *,
+        owns_client: bool = False,
+    ) -> None:
+        self.container = container
+        self._client = client
+        self._owns_client = owns_client
+
+    # ------------------------------------------------------------------
+    # Backwards-compatible factory constructors
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_connection_string(cls, connection_string: str, container: str) -> "AzureBlobBackend":
+        client = AzureBlobClient.from_connection_string(connection_string)
+        return cls(container, client, owns_client=True)
+
+    @classmethod
+    def from_account_key(
+        cls, account_url: str, account_key: str, container: str
+    ) -> "AzureBlobBackend":
+        client = AzureBlobClient.from_account_key(account_url, account_key)
+        return cls(container, client, owns_client=True)
+
+    @classmethod
+    def from_sas_token(
+        cls, account_url: str, sas_token: str, container: str
+    ) -> "AzureBlobBackend":
+        client = AzureBlobClient.from_sas_token(account_url, sas_token)
+        return cls(container, client, owns_client=True)
+
+    @classmethod
+    def from_managed_identity(
+        cls,
+        account_url: str,
+        container: str,
+        client_id: str | None = None,
+    ) -> "AzureBlobBackend":
+        client = AzureBlobClient.from_managed_identity(account_url, client_id=client_id)
+        return cls(container, client, owns_client=True)
+
+    @classmethod
+    def from_service_principal(
+        cls,
+        account_url: str,
+        tenant_id: str,
+        client_id: str,
+        client_secret: str,
+        container: str,
+    ) -> "AzureBlobBackend":
+        client = AzureBlobClient.from_service_principal(
+            account_url, tenant_id, client_id, client_secret
+        )
+        return cls(container, client, owns_client=True)
+
+    # ------------------------------------------------------------------
+    # Convenience accessors (backwards compat)
+    # ------------------------------------------------------------------
+
+    @property
+    def _service(self) -> BlobServiceClient:
+        return self._client._service
+
+    @property
+    def _account_key(self) -> str | None:
+        return self._client._account_key
+
+    @property
+    def _credential(self):
+        return self._client._credential
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def close(self) -> None:
+        if self._owns_client:
+            await self._client.close()
 
     # ------------------------------------------------------------------
     # StorageBackend implementation
@@ -193,9 +290,10 @@ class AzureBlobBackend(StorageBackend):
         except HttpResponseError as e:
             self._raise(e, key)
 
-    async def copy(self, src_key: str, dst_key: str) -> str:
+    async def copy(self, src_key: str, dst_key: str, *, dst_bucket: str | None = None) -> str:
+        target_container = dst_bucket or self.container
         src_blob = self._service.get_blob_client(self.container, src_key)
-        dst_blob = self._service.get_blob_client(self.container, dst_key)
+        dst_blob = self._service.get_blob_client(target_container, dst_key)
         try:
             await dst_blob.start_copy_from_url(src_blob.url)
         except ResourceNotFoundError as e:

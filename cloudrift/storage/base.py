@@ -34,8 +34,12 @@ class StorageBackend(ABC):
         """Generate a presigned URL for the object. expires_in is in seconds."""
 
     @abstractmethod
-    async def copy(self, src_key: str, dst_key: str) -> str:
-        """Copy an object within the same bucket/container. Returns the destination key."""
+    async def copy(self, src_key: str, dst_key: str, *, dst_bucket: str | None = None) -> str:
+        """Copy an object. Defaults to same-bucket copy.
+
+        If ``dst_bucket`` is provided, copies across buckets/containers within
+        the same storage account. Returns the destination key.
+        """
 
     @abstractmethod
     async def get_metadata(self, key: str) -> dict:
@@ -47,9 +51,9 @@ class StorageBackend(ABC):
     ) -> str:
         """Upload from an async byte stream. Returns the object key."""
 
-    async def move(self, src_key: str, dst_key: str) -> str:
-        """Move an object (copy + delete). Returns the destination key."""
-        await self.copy(src_key, dst_key)
+    async def move(self, src_key: str, dst_key: str, *, dst_bucket: str | None = None) -> str:
+        """Move an object (copy + delete on the source). Returns the destination key."""
+        await self.copy(src_key, dst_key, dst_bucket=dst_bucket)
         await self.delete(src_key)
         return dst_key
 

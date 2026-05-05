@@ -1,9 +1,12 @@
+import asyncio
+
 import boto3
 import pytest
 from moto.server import ThreadedMotoServer
 
 from cloudrift.core.exceptions import ObjectNotFoundError
-from cloudrift.storage import get_storage
+from cloudrift.storage import get_storage, get_storage_client
+from cloudrift.storage.s3 import AWSS3Client
 
 BUCKET = "test-bucket"
 REGION = "us-east-1"
@@ -142,3 +145,165 @@ async def test_upload_stream(s3_backend):
     assert key == "streamed.txt"
     data = await s3_backend.download("streamed.txt")
     assert data == b"chunk1chunk2chunk3"
+
+
+# --- Multi-bucket sharing & cross-bucket ops ---
+
+
+@pytest.fixture
+async def s3_client_two_buckets(moto_server, request):
+    """Single AWSS3Client + two freshly-created buckets named A and B."""
+    base = f"shared-{request.node.name}".lower().replace("_", "-")
+    bucket_a = f"{base}-a"
+    bucket_b = f"{base}-b"
+
+    sync = boto3.client(
+        "s3",
+        region_name=REGION,
+        endpoint_url=moto_server,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+    sync.create_bucket(Bucket=bucket_a)
+    sync.create_bucket(Bucket=bucket_b)
+
+    client = get_storage_client(
+        "s3",
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region=REGION,
+        endpoint_url=moto_server,
+    )
+    yield client, bucket_a, bucket_b
+
+    await client.close()
+    for bucket in (bucket_a, bucket_b):
+        for obj in sync.list_objects_v2(Bucket=bucket).get("Contents", []):
+            sync.delete_object(Bucket=bucket, Key=obj["Key"])
+        sync.delete_bucket(Bucket=bucket)
+
+
+async def test_get_storage_client_returns_account_client(s3_client_two_buckets):
+    client, _, _ = s3_client_two_buckets
+    assert isinstance(client, AWSS3Client)
+
+
+async def test_multiple_buckets_share_one_sdk_client(s3_client_two_buckets):
+    client, bucket_a, bucket_b = s3_client_two_buckets
+    view_a = client.bucket(bucket_a)
+    view_b = client.bucket(bucket_b)
+
+    # Force lazy client init via any operation.
+    await view_a.upload("a.txt", b"a")
+    await view_b.upload("b.txt", b"b")
+
+    # The two views must reference the exact same underlying SDK client.
+    assert client._client is not None
+    sdk_client = client._client
+    # Issuing a third view does not create a new SDK client.
+    view_c = client.bucket(bucket_a)
+    await view_c.exists("a.txt")
+    assert client._client is sdk_client
+
+
+async def test_buckets_are_isolated(s3_client_two_buckets):
+    client, bucket_a, bucket_b = s3_client_two_buckets
+    view_a = client.bucket(bucket_a)
+    view_b = client.bucket(bucket_b)
+
+    await view_a.upload("only-in-a.txt", b"a-data")
+    await view_b.upload("only-in-b.txt", b"b-data")
+
+    assert await view_a.list() == ["only-in-a.txt"]
+    assert await view_b.list() == ["only-in-b.txt"]
+    assert not await view_a.exists("only-in-b.txt")
+    assert not await view_b.exists("only-in-a.txt")
+
+
+async def test_concurrent_uploads_share_pool(s3_client_two_buckets):
+    client, bucket_a, bucket_b = s3_client_two_buckets
+    views = [client.bucket(bucket_a), client.bucket(bucket_b), client.bucket(bucket_a)]
+
+    await asyncio.gather(
+        views[0].upload("k0.txt", b"0"),
+        views[1].upload("k1.txt", b"1"),
+        views[2].upload("k2.txt", b"2"),
+    )
+
+    # Single SDK client served all three concurrent requests.
+    assert client._client is not None
+
+
+async def test_cross_bucket_copy(s3_client_two_buckets):
+    client, bucket_a, bucket_b = s3_client_two_buckets
+    view_a = client.bucket(bucket_a)
+    view_b = client.bucket(bucket_b)
+
+    await view_a.upload("src.txt", b"hello cross")
+    dst = await view_a.copy("src.txt", "copied.txt", dst_bucket=bucket_b)
+
+    assert dst == "copied.txt"
+    assert await view_b.download("copied.txt") == b"hello cross"
+    # Source untouched.
+    assert await view_a.exists("src.txt")
+
+
+async def test_cross_bucket_move(s3_client_two_buckets):
+    client, bucket_a, bucket_b = s3_client_two_buckets
+    view_a = client.bucket(bucket_a)
+    view_b = client.bucket(bucket_b)
+
+    await view_a.upload("to-move.txt", b"moving")
+    dst = await view_a.move("to-move.txt", "moved.txt", dst_bucket=bucket_b)
+
+    assert dst == "moved.txt"
+    assert await view_b.download("moved.txt") == b"moving"
+    assert not await view_a.exists("to-move.txt")
+
+
+async def test_view_close_is_noop_when_shared(s3_client_two_buckets):
+    """Closing a view obtained from client.bucket(...) must NOT kill the SDK client."""
+    client, bucket_a, bucket_b = s3_client_two_buckets
+    view_a = client.bucket(bucket_a)
+    view_b = client.bucket(bucket_b)
+
+    await view_a.upload("a.txt", b"a")
+    sdk_client = client._client
+    assert sdk_client is not None
+
+    await view_a.close()  # no-op
+    # Sibling view still works because the SDK client is intact.
+    assert client._client is sdk_client
+    await view_b.upload("b.txt", b"b")
+    assert await view_b.exists("b.txt")
+
+
+async def test_get_storage_view_owns_client_and_closes_it(moto_server):
+    """A backend obtained from get_storage() owns its client and closes it."""
+    bucket = "owned-close-test"
+    sync = boto3.client(
+        "s3",
+        region_name=REGION,
+        endpoint_url=moto_server,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+    )
+    sync.create_bucket(Bucket=bucket)
+    try:
+        backend = get_storage(
+            "s3",
+            bucket=bucket,
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+            region=REGION,
+            endpoint_url=moto_server,
+        )
+        await backend.upload("k.txt", b"data")
+        assert backend._client._client is not None
+        await backend.close()
+        # SDK client released.
+        assert backend._client._client is None
+    finally:
+        for obj in sync.list_objects_v2(Bucket=bucket).get("Contents", []):
+            sync.delete_object(Bucket=bucket, Key=obj["Key"])
+        sync.delete_bucket(Bucket=bucket)
