@@ -1,0 +1,68 @@
+name: Release — Tag, Publish to PyPI & Create GitHub Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run tests
+        run: uv run pytest tests/ -v --ignore=tests/integration
+
+  verify-version:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches pyproject.toml version
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PYPROJECT_VERSION=$(grep '^version' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "Tag version:        $TAG_VERSION"
+          echo "pyproject version:  $PYPROJECT_VERSION"
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Tag v$TAG_VERSION does not match pyproject.toml version $PYPROJECT_VERSION"
+            exit 1
+          fi
+
+  publish:
+    needs: [test, verify-version]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write    # PyPI Trusted Publishing (OIDC)
+      contents: write    # Create GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so release notes can diff against the previous tag
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build distribution
+        run: uv build
+
+      - name: Publish to PyPI (OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
