@@ -105,14 +105,18 @@ class AWSSNSBackend(PubSubBackend):
                     config=self._config,
                     **self._client_kwargs,
                 )
-                self._client = await self._client_cm.__aenter__()
+                try:
+                    self._client = await self._client_cm.__aenter__()
+                except Exception:
+                    self._client_cm = None
+                    raise
         return self._client
 
     async def close(self) -> None:
-        if self._client_cm is not None:
-            await self._client_cm.__aexit__(None, None, None)
-            self._client = None
-            self._client_cm = None
+        client_cm, self._client_cm = self._client_cm, None
+        self._client = None
+        if client_cm is not None:
+            await client_cm.__aexit__(None, None, None)
 
     # ------------------------------------------------------------------
     # PubSubBackend implementation
