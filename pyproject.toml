@@ -24,6 +24,13 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Homepage      = "https://github.com/LYZR-OSS/cloudrift"
+Repository    = "https://github.com/LYZR-OSS/cloudrift"
+Issues        = "https://github.com/LYZR-OSS/cloudrift/issues"
+Changelog     = "https://github.com/LYZR-OSS/cloudrift/releases"
+Documentation = "https://github.com/LYZR-OSS/cloudrift#readme"
+
 [project.optional-dependencies]
 aws = [
     "aioboto3>=13.0.0",       # native async S3 / SQS / SNS / Secrets Manager
