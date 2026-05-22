@@ -1,9 +1,9 @@
 # cloudrift
 
-Cloud-agnostic abstraction for **storage**, **messaging**, **document databases**, and **cache** — built for Lyzr microservices.
+Cloud-agnostic abstraction for **storage**, **messaging**, **document databases**, **cache**, and **email** — built for Lyzr microservices.
 
-- **Async-first.** Every public method is `async def`. All four categories use native-async SDK clients (`aioboto3`, `azure.*.aio`, `motor`, `redis.asyncio`) — no thread-pool wrapping.
-- **Drop-in providers.** Same interface across AWS, Azure, and self-hosted backends. Swap `s3` ↔ `azure_blob` (or `sqs` ↔ `azure_bus`, `documentdb` ↔ `cosmos`, `redis` ↔ `elasticache` ↔ `azure_redis`) by changing one string.
+- **Async-first.** Every public method is `async def`. All five categories use native-async SDK clients (`aioboto3`, `azure.*.aio`, `motor`, `redis.asyncio`, `aiosmtplib`) — no thread-pool wrapping.
+- **Drop-in providers.** Same interface across AWS, Azure, and self-hosted backends. Swap `s3` ↔ `azure_blob` (or `sqs` ↔ `azure_bus`, `documentdb` ↔ `cosmos`, `redis` ↔ `elasticache` ↔ `azure_redis`, `ses` ↔ `azure_acs` ↔ `smtp`) by changing one string.
 - **Multiple auth methods per provider.** Static keys, IAM roles, profiles, managed identity, service principals, SAS tokens, mTLS, IAM auth — pick what your microservice already has.
 
 | Category | AWS | Azure | Self-hosted |
@@ -12,6 +12,7 @@ Cloud-agnostic abstraction for **storage**, **messaging**, **document databases*
 | Messaging | SQS | Service Bus | — |
 | Document DB | DocumentDB | Cosmos DB (MongoDB API) | — |
 | Cache | ElastiCache | Azure Cache for Redis | Redis |
+| Email | SES | Communication Services | SMTP |
 
 ---
 
@@ -20,9 +21,10 @@ Cloud-agnostic abstraction for **storage**, **messaging**, **document databases*
 Pick the extras your service needs:
 
 ```bash
-pip install "cloudrift[aws]"          # S3 + SQS + DocumentDB + Redis client
-pip install "cloudrift[azure]"        # Blob + Service Bus + Cosmos + Redis client
+pip install "cloudrift[aws]"          # S3 + SQS + DocumentDB + SES + Redis client
+pip install "cloudrift[azure]"        # Blob + Service Bus + Cosmos + ACS Email + Redis client
 pip install "cloudrift[cache]"        # Just Redis (any flavour)
+pip install "cloudrift[email]"        # Just raw SMTP (aiosmtplib)
 pip install "cloudrift[all]"          # Everything
 ```
 
@@ -254,6 +256,74 @@ await cache.close()
 
 ---
 
+## Email
+
+```python
+from cloudrift.email import get_email
+
+# AWS SES (SESv2)
+ses = get_email("ses", region="us-east-1", default_from="noreply@example.com")     # IAM / env
+ses = get_email("ses", aws_access_key_id="AKIA...",
+                aws_secret_access_key="...", region="us-east-1",
+                default_from="noreply@example.com")                                 # static keys
+ses = get_email("ses", profile_name="dev", region="us-east-1",
+                default_from="noreply@example.com")                                 # ~/.aws profile
+
+# Azure Communication Services
+acs = get_email("azure_acs",
+                connection_string="endpoint=https://...;accesskey=...",
+                default_from="DoNotReply@example.com")                              # connection string
+acs = get_email("azure_acs", endpoint="https://x.communication.azure.com",
+                default_from="DoNotReply@example.com")                              # managed identity
+acs = get_email("azure_acs", endpoint="https://x.communication.azure.com",
+                tenant_id="...", client_id="...", client_secret="...",
+                default_from="DoNotReply@example.com")                              # service principal
+
+# Raw SMTP (SendGrid, Mailgun, Postmark, Office365, MailHog, ...)
+smtp = get_email("smtp", host="smtp.sendgrid.net",
+                 username="apikey", password="...",
+                 default_from="noreply@example.com")                                # STARTTLS, port 587 (default)
+smtp = get_email("smtp", mode="tls", host="smtp.example.com", port=465,
+                 username="user", password="pw",
+                 default_from="noreply@example.com")                                # implicit TLS
+smtp = get_email("smtp", mode="plaintext", host="localhost", port=1025,
+                 default_from="noreply@example.test")                               # MailHog / Mailpit (dev)
+```
+
+**Operations** — same on every backend:
+
+```python
+from cloudrift.email import Attachment, EmailMessage
+
+# Single send (text, HTML, or multipart/alternative)
+msg_id: str = await email.send(
+    "alice@example.com",
+    "Welcome",
+    body_text="Plain text body",
+    body_html="<p>HTML body</p>",
+    cc=["bob@example.com"], bcc=["audit@example.com"],
+    reply_to=["support@example.com"],
+    attachments=[Attachment(filename="welcome.pdf",
+                            content=pdf_bytes,
+                            content_type="application/pdf")],
+    headers={"X-Campaign": "welcome-v2"},
+)
+
+# Batch send (loops `send()` by default; subclasses override when the
+# provider exposes a true bulk API)
+ids: list[str] = await email.send_batch([
+    EmailMessage(to=["alice@example.com"], subject="hi",  body_text="hi"),
+    EmailMessage(to=["bob@example.com"],   subject="hi2", body_html="<b>hi2</b>"),
+])
+
+ok: bool = await email.health_check()
+await email.close()
+```
+
+> **Default sender.** Each backend accepts a `default_from` at construction time; calls that omit `from_` fall back to it. SES requires the sender (address or domain) to be verified; ACS requires the sending domain to be linked to the resource.
+
+---
+
 ## Connection pooling & lifecycle
 
 Every backend holds **one long-lived async client** that is reused across all operations. This is the single biggest perf knob:
@@ -285,6 +355,8 @@ from cloudrift.core.exceptions import (
     QueueNotFoundError, MessageSendError, MessagingError,
     DocumentConnectionError,
     CacheKeyNotFoundError, CacheConnectionError, CacheError,
+    EmailError, EmailSendError,
+    RecipientRejectedError, SenderUnverifiedError, EmailThrottledError,
 )
 
 try:

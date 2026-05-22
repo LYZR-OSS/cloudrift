@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "lyzr-cloudrift"
 version = "0.2.1"
-description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, and pub/sub"
+description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, pub/sub, and email"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -13,6 +13,7 @@ keywords = [
     "cloud", "aws", "azure", "s3", "blob", "sqs", "servicebus",
     "documentdb", "cosmosdb", "redis", "elasticache", "cache",
     "secrets", "keyvault", "sns", "eventgrid", "pubsub",
+    "email", "ses", "smtp",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -33,7 +34,7 @@ Documentation = "https://github.com/LYZR-OSS/cloudrift#readme"
 
 [project.optional-dependencies]
 aws = [
-    "aioboto3>=13.0.0",       # native async S3 / SQS / SNS / Secrets Manager
+    "aioboto3>=13.0.0",       # native async S3 / SQS / SNS / Secrets Manager / SES
     "motor>=3.3.0",           # async MongoDB driver for DocumentDB
     "redis[hiredis]>=5.0.0",  # ElastiCache (also used by standalone)
 ]
@@ -43,11 +44,15 @@ azure = [
     "azure-identity>=1.15.0",
     "azure-keyvault-secrets>=4.7.0",
     "azure-eventgrid>=4.9.0",
+    "azure-communication-email>=1.0.0",
     "motor>=3.3.0",           # Cosmos DB via MongoDB API
     "redis[hiredis]>=5.0.0",  # Azure Cache for Redis
 ]
 cache = [
     "redis[hiredis]>=5.0.0",
+]
+email = [
+    "aiosmtplib>=3.0",        # raw SMTP backend
 ]
 all = [
     "aioboto3>=13.0.0",
@@ -57,17 +62,21 @@ all = [
     "azure-identity>=1.15.0",
     "azure-keyvault-secrets>=4.7.0",
     "azure-eventgrid>=4.9.0",
+    "azure-communication-email>=1.0.0",
     "redis[hiredis]>=5.0.0",
+    "aiosmtplib>=3.0",
 ]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "moto[s3,sqs,sns,secretsmanager,server]>=5.0",
+    "moto[s3,sqs,sns,ses,secretsmanager,server]>=5.0",
     "aioboto3>=13.0.0",
     "motor>=3.3.0",
     "fakeredis>=2.20.0",
     "httpx>=0.25.0",
     "ruff>=0.4.0",
+    "aiosmtplib>=3.0",
+    "azure-communication-email>=1.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]

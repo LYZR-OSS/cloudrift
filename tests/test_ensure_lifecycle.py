@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cloudrift.email.ses import AWSSESBackend
 from cloudrift.messaging.sqs import AWSSQSBackend
 from cloudrift.pubsub.sns import AWSSNSBackend
 from cloudrift.secrets.aws_secrets_manager import AWSSecretsManagerBackend
@@ -69,8 +70,9 @@ def _fake_session(cm):
         lambda s: AWSSNSBackend(s),
         lambda s: AWSSQSBackend("https://example/queue", s),
         lambda s: AWSSecretsManagerBackend(s),
+        lambda s: AWSSESBackend(s),
     ],
-    ids=["s3", "sns", "sqs", "secrets"],
+    ids=["s3", "sns", "sqs", "secrets", "ses"],
 )
 async def test_ensure_clears_client_cm_on_aenter_failure(factory):
     cm = _BoomCM()
@@ -92,8 +94,9 @@ async def test_ensure_clears_client_cm_on_aenter_failure(factory):
         lambda s: AWSSNSBackend(s),
         lambda s: AWSSQSBackend("https://example/queue", s),
         lambda s: AWSSecretsManagerBackend(s),
+        lambda s: AWSSESBackend(s),
     ],
-    ids=["s3", "sns", "sqs", "secrets"],
+    ids=["s3", "sns", "sqs", "secrets", "ses"],
 )
 async def test_close_is_noop_after_failed_ensure(factory):
     """Calling close() after a failed _ensure() must be a clean no-op."""
@@ -118,8 +121,9 @@ async def test_close_is_noop_after_failed_ensure(factory):
         lambda s: AWSSNSBackend(s),
         lambda s: AWSSQSBackend("https://example/queue", s),
         lambda s: AWSSecretsManagerBackend(s),
+        lambda s: AWSSESBackend(s),
     ],
-    ids=["s3", "sns", "sqs", "secrets"],
+    ids=["s3", "sns", "sqs", "secrets", "ses"],
 )
 async def test_close_clears_state_even_if_aexit_raises(factory):
     """If __aexit__ raises during close, the object must still end up clean."""

@@ -70,3 +70,24 @@ class TopicNotFoundError(PubSubError):
 
 class PublishError(PubSubError):
     """Raised when a message fails to publish."""
+
+
+# Email exceptions
+class EmailError(CloudRiftError):
+    """Base exception for email operations."""
+
+
+class EmailSendError(EmailError):
+    """Raised when an email fails to send."""
+
+
+class RecipientRejectedError(EmailError):
+    """Raised when one or more recipients are rejected by the provider."""
+
+
+class SenderUnverifiedError(EmailError):
+    """Raised when the From address or domain is not verified with the provider."""
+
+
+class EmailThrottledError(EmailError):
+    """Raised when the provider rate-limits the send."""
