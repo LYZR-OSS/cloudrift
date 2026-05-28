@@ -4,6 +4,7 @@ from cloudrift.document import get_mongodb
 from cloudrift.cache import get_cache
 from cloudrift.secrets import get_secrets
 from cloudrift.pubsub import get_pubsub
+from cloudrift.email import get_email
 
 __version__ = "0.2.0"
 __all__ = [
@@ -13,4 +14,5 @@ __all__ = [
     "get_cache",
     "get_secrets",
     "get_pubsub",
+    "get_email",
 ]
