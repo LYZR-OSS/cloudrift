@@ -568,10 +568,14 @@ def test_factory_acs_routing_connection_string():
 
 def test_factory_acs_routing_service_principal():
     # Just constructs the credential; no SDK calls.
+    # NB: `azure` is a PEP 420 namespace package — `azure.identity` is not
+    # discoverable as an attribute on `azure` until something imports it
+    # directly. `patch("azure.identity...")` triggers that lookup, so we
+    # import the submodule here and patch it via `patch.object`.
+    import azure.identity
+
     fake_cred = MagicMock(name="creds")
-    with patch(
-        "azure.identity.ClientSecretCredential", return_value=fake_cred
-    ):
+    with patch.object(azure.identity, "ClientSecretCredential", return_value=fake_cred):
         backend = get_email(
             "azure_acs",
             endpoint="https://x.communication.azure.com",
