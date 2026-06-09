@@ -28,6 +28,7 @@ class AWSSQSBackend(MessagingBackend):
         session: aioboto3.Session,
         *,
         endpoint_url: str | None = None,
+        dlq_url: str | None = None,
         max_pool_connections: int = 50,
         connect_timeout: float = 10.0,
         read_timeout: float = 60.0,
@@ -36,6 +37,9 @@ class AWSSQSBackend(MessagingBackend):
         self.queue_url = queue_url
         self._session = session
         self._endpoint_url = endpoint_url
+        # Explicit DLQ URL; if None it is resolved lazily from the source queue's
+        # RedrivePolicy the first time dead_letter() is called.
+        self._dlq_url = dlq_url
         self._config = Config(
             max_pool_connections=max_pool_connections,
             connect_timeout=connect_timeout,
@@ -45,6 +49,10 @@ class AWSSQSBackend(MessagingBackend):
         self._client_cm = None
         self._client = None
         self._lock = asyncio.Lock()
+        # receipt_handle → raw message body (JSON string), retained between
+        # receive() and delete()/dead_letter() so emulated dead-lettering can
+        # re-send the original payload to the DLQ.
+        self._pending: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Factory constructors
@@ -158,15 +166,18 @@ class AWSSQSBackend(MessagingBackend):
                 WaitTimeSeconds=wait_time,
                 AttributeNames=["All"],
             )
-            return [
-                Message(
-                    id=m["MessageId"],
-                    body=json.loads(m["Body"]),
-                    receipt_handle=m["ReceiptHandle"],
-                    attributes=m.get("Attributes", {}),
+            messages = []
+            for m in response.get("Messages", []):
+                self._pending[m["ReceiptHandle"]] = m["Body"]
+                messages.append(
+                    Message(
+                        id=m["MessageId"],
+                        body=json.loads(m["Body"]),
+                        receipt_handle=m["ReceiptHandle"],
+                        attributes=m.get("Attributes", {}),
+                    )
                 )
-                for m in response.get("Messages", [])
-            ]
+            return messages
         except ClientError as e:
             self._raise(e)
 
@@ -176,6 +187,66 @@ class AWSSQSBackend(MessagingBackend):
             await client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
         except ClientError as e:
             self._raise(e)
+        finally:
+            self._pending.pop(receipt_handle, None)
+
+    async def dead_letter(self, receipt_handle: str, reason: str) -> None:
+        client = await self._ensure()
+        body = self._pending.get(receipt_handle)
+        if body is None:
+            raise MessagingError(
+                f"No pending message for receipt handle: {receipt_handle!r}. "
+                "Call receive() first and use the returned receipt_handle."
+            )
+        dlq_url = await self._resolve_dlq_url(client)
+        try:
+            await client.send_message(
+                QueueUrl=dlq_url,
+                MessageBody=body,
+                MessageAttributes={
+                    "DeadLetterReason": {"DataType": "String", "StringValue": reason}
+                },
+            )
+            await client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
+        except ClientError as e:
+            self._raise(e)
+        else:
+            self._pending.pop(receipt_handle, None)
+
+    async def get_queue_depth(self) -> int:
+        client = await self._ensure()
+        try:
+            response = await client.get_queue_attributes(
+                QueueUrl=self.queue_url,
+                AttributeNames=["ApproximateNumberOfMessages"],
+            )
+            return int(response["Attributes"]["ApproximateNumberOfMessages"])
+        except ClientError as e:
+            self._raise(e)
+
+    async def _resolve_dlq_url(self, client) -> str:
+        """Return the configured DLQ URL, deriving it from RedrivePolicy if needed."""
+        if self._dlq_url is not None:
+            return self._dlq_url
+        try:
+            response = await client.get_queue_attributes(
+                QueueUrl=self.queue_url, AttributeNames=["RedrivePolicy"]
+            )
+        except ClientError as e:
+            self._raise(e)
+        redrive = response.get("Attributes", {}).get("RedrivePolicy")
+        if not redrive:
+            raise MessagingError(
+                f"No dead-letter queue configured for {self.queue_url}. Pass dlq_url= "
+                "when constructing the backend, or set a RedrivePolicy on the queue."
+            )
+        target_arn = json.loads(redrive)["deadLetterTargetArn"]
+        dlq_name = target_arn.rsplit(":", 1)[-1]
+        try:
+            self._dlq_url = (await client.get_queue_url(QueueName=dlq_name))["QueueUrl"]
+        except ClientError as e:
+            self._raise(e)
+        return self._dlq_url
 
     async def purge(self) -> None:
         client = await self._ensure()

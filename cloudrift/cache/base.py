@@ -97,6 +97,14 @@ class CacheBackend(ABC):
         """Return all members of the set at *key*."""
 
     @abstractmethod
+    async def sinter(self, *keys: str) -> "set[bytes]":
+        """Return the members common to all sets at *keys* (set intersection).
+
+        With a single key this is equivalent to :meth:`smembers`. A missing key
+        is treated as an empty set, so any missing key yields an empty result.
+        """
+
+    @abstractmethod
     async def lpush(self, key: str, *values: bytes | str) -> int:
         """Prepend values to the list at *key*. Returns new list length."""
 
@@ -280,6 +288,14 @@ class _RedisMixin:
     async def smembers(self, key: str) -> "set[bytes]":
         try:
             return await self._client.smembers(key)
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+    async def sinter(self, *keys: str) -> "set[bytes]":
+        if not keys:
+            raise ValueError("sinter() requires at least one key")
+        try:
+            return set(await self._client.sinter(keys))
         except RedisError as e:
             raise CacheError(str(e)) from e
 

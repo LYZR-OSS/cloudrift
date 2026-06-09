@@ -34,6 +34,28 @@ class MessagingBackend(ABC):
         """Delete/acknowledge a message by its receipt handle."""
 
     @abstractmethod
+    async def dead_letter(self, receipt_handle: str, reason: str) -> None:
+        """Move a received message to the dead-letter queue and acknowledge it.
+
+        Args:
+            receipt_handle: The receipt handle from a previously received message.
+            reason: A human-readable reason recorded with the dead-lettered message.
+
+        Azure Service Bus implements this natively via ``dead_letter_message``.
+        SQS has no native per-message dead-letter API, so backends emulate it by
+        sending the message body to a configured dead-letter queue and then
+        deleting the original from the source queue.
+        """
+
+    @abstractmethod
+    async def get_queue_depth(self) -> int:
+        """Return the approximate number of messages waiting in the queue.
+
+        This is an estimate: cloud queues report it asynchronously and it may
+        lag in-flight (received-but-not-yet-deleted) messages.
+        """
+
+    @abstractmethod
     async def purge(self) -> None:
         """Delete all messages in the queue."""
 
