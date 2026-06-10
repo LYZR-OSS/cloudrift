@@ -5,7 +5,12 @@ import aioboto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from cloudrift.core.exceptions import MessageSendError, MessagingError, QueueNotFoundError
+from cloudrift.core.exceptions import (
+    FeatureNotSupportedError,
+    MessageSendError,
+    MessagingError,
+    QueueNotFoundError,
+)
 from cloudrift.messaging.base import Message, MessagingBackend
 
 
@@ -34,6 +39,7 @@ class AWSSQSBackend(MessagingBackend):
         client_kwargs: dict | None = None,
     ) -> None:
         self.queue_url = queue_url
+        self._is_fifo = queue_url.endswith(".fifo")
         self._session = session
         self._endpoint_url = endpoint_url
         self._config = Config(
@@ -127,23 +133,65 @@ class AWSSQSBackend(MessagingBackend):
     # MessagingBackend implementation
     # ------------------------------------------------------------------
 
-    async def send(self, message: dict, delay: int = 0) -> str:
+    def _fifo_params(
+        self, group_id: str | None, dedup_id: str | None, delay: int = 0
+    ) -> dict:
+        """Validate FIFO/standard constraints and return per-message kwargs."""
+        if self._is_fifo:
+            if delay:
+                raise FeatureNotSupportedError(
+                    "SQS FIFO queues do not support per-message delay; "
+                    "use a queue-level delivery delay instead"
+                )
+            if not group_id:
+                raise MessageSendError(
+                    "group_id is required when sending to an SQS FIFO queue"
+                )
+            params: dict = {"MessageGroupId": group_id}
+            if dedup_id:
+                params["MessageDeduplicationId"] = dedup_id
+            return params
+        if group_id or dedup_id:
+            raise FeatureNotSupportedError(
+                "group_id/dedup_id are only supported on SQS FIFO queues "
+                f"(queue: {self.queue_url})"
+            )
+        return {"DelaySeconds": delay} if delay else {}
+
+    async def send(
+        self,
+        message: dict,
+        delay: int = 0,
+        *,
+        group_id: str | None = None,
+        dedup_id: str | None = None,
+    ) -> str:
         client = await self._ensure()
+        params = self._fifo_params(group_id, dedup_id, delay)
         try:
             response = await client.send_message(
                 QueueUrl=self.queue_url,
                 MessageBody=json.dumps(message),
-                DelaySeconds=delay,
+                **params,
             )
             return response["MessageId"]
         except ClientError as e:
             self._raise(e)
 
-    async def send_batch(self, messages: list[dict]) -> list[str]:
+    async def send_batch(
+        self,
+        messages: list[dict],
+        *,
+        group_id: str | None = None,
+        dedup_ids: list[str] | None = None,
+    ) -> list[str]:
         client = await self._ensure()
-        entries = [
-            {"Id": str(i), "MessageBody": json.dumps(msg)} for i, msg in enumerate(messages)
-        ]
+        if dedup_ids is not None and len(dedup_ids) != len(messages):
+            raise MessageSendError("dedup_ids must be parallel to messages")
+        entries = []
+        for i, msg in enumerate(messages):
+            params = self._fifo_params(group_id, dedup_ids[i] if dedup_ids else None)
+            entries.append({"Id": str(i), "MessageBody": json.dumps(msg), **params})
         try:
             response = await client.send_message_batch(QueueUrl=self.queue_url, Entries=entries)
             if response.get("Failed"):
@@ -153,24 +201,58 @@ class AWSSQSBackend(MessagingBackend):
         except ClientError as e:
             self._raise(e)
 
-    async def receive(self, max_messages: int = 1, wait_time: int = 0) -> list[Message]:
+    async def receive(
+        self,
+        max_messages: int = 1,
+        wait_time: int = 0,
+        *,
+        group_id: str | None = None,
+        visibility_timeout: int | None = None,
+    ) -> list[Message]:
+        if group_id is not None:
+            raise FeatureNotSupportedError(
+                "SQS cannot receive from a specific message group"
+            )
         client = await self._ensure()
+        kwargs: dict = {}
+        if visibility_timeout is not None:
+            kwargs["VisibilityTimeout"] = visibility_timeout
         try:
             response = await client.receive_message(
                 QueueUrl=self.queue_url,
                 MaxNumberOfMessages=min(max_messages, 10),
                 WaitTimeSeconds=wait_time,
                 AttributeNames=["All"],
+                **kwargs,
             )
-            return [
-                Message(
-                    id=m["MessageId"],
-                    body=json.loads(m["Body"]),
-                    receipt_handle=m["ReceiptHandle"],
-                    attributes=m.get("Attributes", {}),
+            messages = []
+            for m in response.get("Messages", []):
+                attrs = m.get("Attributes", {})
+                receive_count = attrs.get("ApproximateReceiveCount")
+                messages.append(
+                    Message(
+                        id=m["MessageId"],
+                        body=json.loads(m["Body"]),
+                        receipt_handle=m["ReceiptHandle"],
+                        attributes=attrs,
+                        group_id=attrs.get("MessageGroupId"),
+                        dedup_id=attrs.get("MessageDeduplicationId"),
+                        receive_count=int(receive_count) if receive_count else None,
+                    )
                 )
-                for m in response.get("Messages", [])
-            ]
+            return messages
+        except ClientError as e:
+            self._raise(e)
+
+    async def nack(self, receipt_handle: str) -> None:
+        """Make the message immediately visible again for redelivery."""
+        client = await self._ensure()
+        try:
+            await client.change_message_visibility(
+                QueueUrl=self.queue_url,
+                ReceiptHandle=receipt_handle,
+                VisibilityTimeout=0,
+            )
         except ClientError as e:
             self._raise(e)
 

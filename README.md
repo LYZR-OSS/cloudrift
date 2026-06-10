@@ -147,13 +147,53 @@ ids = await queue.send_batch([{"n": 1}, {"n": 2}])
 messages = await queue.receive(max_messages=10, wait_time=20)   # long-poll
 for m in messages:
     handle_job(m.body)
-    await queue.delete(m.receipt_handle)   # ack (SQS only — see below)
+    await queue.delete(m.receipt_handle)   # ack
+    # or: await queue.nack(m.receipt_handle)  # return for immediate redelivery
 
 await queue.purge()
 await queue.close()
 ```
 
-> **Azure Service Bus note:** `delete(receipt_handle)` raises `NotImplementedError` because Service Bus completes messages via the receiver's lock token, not by handle. Until the abstraction is reworked, complete messages inside a custom receiver loop using `azure-servicebus` directly, or use the `purge()` helper.
+> **Azure Service Bus note:** receipt handles are lock tokens — they are only
+> valid on the same backend instance that received the message, and only within
+> the message lock duration. SQS receipt handles, by contrast, are plain strings
+> usable from any client.
+
+### FIFO queues / ordered delivery
+
+For SQS FIFO queues (URL ending in `.fifo`) and session-enabled Service Bus
+queues, pass `group_id` (ordering key) and `dedup_id` (deduplication key):
+
+```python
+# SQS FIFO — group_id is required, dedup_id optional if the queue has
+# content-based deduplication enabled
+fifo = get_queue("sqs", queue_url="https://sqs.../jobs.fifo", region="us-east-1")
+await fifo.send({"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
+
+# Azure Service Bus — queue must be created with sessions enabled;
+# pass session_enabled=True so the backend uses session receivers
+bus = get_queue("azure_bus", connection_string="...", queue_name="jobs",
+                session_enabled=True)
+await bus.send({"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
+
+messages = await fifo.receive(max_messages=10, wait_time=20, visibility_timeout=300)
+for m in messages:
+    print(m.group_id, m.dedup_id, m.receive_count)
+    await fifo.delete(m.receipt_handle)            # ack
+# Azure only: receive from a specific session
+messages = await bus.receive(group_id="owner-123")
+```
+
+Semantic differences to be aware of:
+
+| | SQS FIFO | Azure Service Bus (sessions) |
+|---|---|---|
+| Ordering | Per `MessageGroupId`, groups interleave on receive | Per session; `receive()` without `group_id` drains one session at a time (`NEXT_AVAILABLE_SESSION`) |
+| Deduplication | Fixed 5-minute window by `dedup_id` or content hash | By `message_id`, only if the queue enables duplicate detection (window 20s–7d) |
+| Per-message `delay` | Not supported — raises `FeatureNotSupportedError` | Supported (scheduled enqueue) |
+| `receive(group_id=...)` | Not supported — raises `FeatureNotSupportedError` | Supported |
+| `visibility_timeout` on receive | Supported | Ignored (lock duration is queue-level config) |
+| `nack()` | `change_message_visibility(0)` — does not bump receive count until redelivery | `abandon_message` — increments `delivery_count` |
 
 ---
 
@@ -352,7 +392,7 @@ All backends raise from a single hierarchy under `cloudrift.core.exceptions`:
 ```python
 from cloudrift.core.exceptions import (
     ObjectNotFoundError, StoragePermissionError, StorageError,
-    QueueNotFoundError, MessageSendError, MessagingError,
+    QueueNotFoundError, MessageSendError, MessagingError, FeatureNotSupportedError,
     DocumentConnectionError,
     CacheKeyNotFoundError, CacheConnectionError, CacheError,
     EmailError, EmailSendError,

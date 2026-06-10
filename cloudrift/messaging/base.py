@@ -8,6 +8,9 @@ class Message:
     body: dict
     receipt_handle: str
     attributes: dict = field(default_factory=dict)
+    group_id: str | None = None
+    dedup_id: str | None = None
+    receive_count: int | None = None
 
 
 class MessagingBackend(ABC):
@@ -15,23 +18,66 @@ class MessagingBackend(ABC):
 
     Backends hold long-lived async clients. Use ``await backend.close()`` (or
     ``async with backend:``) to release sockets cleanly.
+
+    FIFO / ordered queues: ``group_id`` maps to SQS ``MessageGroupId`` and
+    Service Bus ``session_id``; ``dedup_id`` maps to SQS
+    ``MessageDeduplicationId`` and Service Bus ``message_id`` (effective only
+    when the queue has duplicate detection enabled).
     """
 
     @abstractmethod
-    async def send(self, message: dict, delay: int = 0) -> str:
-        """Send a message. Returns the message ID."""
+    async def send(
+        self,
+        message: dict,
+        delay: int = 0,
+        *,
+        group_id: str | None = None,
+        dedup_id: str | None = None,
+    ) -> str:
+        """Send a message. Returns the message ID.
+
+        group_id/dedup_id apply to FIFO (SQS) or session-enabled (Service Bus)
+        queues. SQS FIFO does not support per-message ``delay``.
+        """
 
     @abstractmethod
-    async def send_batch(self, messages: list[dict]) -> list[str]:
-        """Send multiple messages. Returns list of message IDs."""
+    async def send_batch(
+        self,
+        messages: list[dict],
+        *,
+        group_id: str | None = None,
+        dedup_ids: list[str] | None = None,
+    ) -> list[str]:
+        """Send multiple messages. Returns list of message IDs.
+
+        ``group_id`` applies to every message; ``dedup_ids``, if given, must be
+        parallel to ``messages``.
+        """
 
     @abstractmethod
-    async def receive(self, max_messages: int = 1, wait_time: int = 0) -> list[Message]:
-        """Receive messages. wait_time is long-poll duration in seconds."""
+    async def receive(
+        self,
+        max_messages: int = 1,
+        wait_time: int = 0,
+        *,
+        group_id: str | None = None,
+        visibility_timeout: int | None = None,
+    ) -> list[Message]:
+        """Receive messages. wait_time is long-poll duration in seconds.
+
+        ``group_id`` receives from a specific session (Service Bus only; SQS
+        cannot filter by group). ``visibility_timeout`` overrides the queue's
+        visibility timeout on SQS; ignored on Service Bus (lock duration is
+        queue-level configuration).
+        """
 
     @abstractmethod
     async def delete(self, receipt_handle: str) -> None:
         """Delete/acknowledge a message by its receipt handle."""
+
+    async def nack(self, receipt_handle: str) -> None:
+        """Return a message to the queue for immediate redelivery."""
+        raise NotImplementedError(f"{type(self).__name__} does not support nack()")
 
     @abstractmethod
     async def purge(self) -> None:
