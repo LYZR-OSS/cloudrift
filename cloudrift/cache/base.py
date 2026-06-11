@@ -295,7 +295,7 @@ class _RedisMixin:
         if not keys:
             raise ValueError("sinter() requires at least one key")
         try:
-            return set(await self._client.sinter(keys))
+            return set(await self._client.sinter(*keys))
         except RedisError as e:
             raise CacheError(str(e)) from e
 
