@@ -219,7 +219,7 @@ class AWSSQSBackend(MessagingBackend):
             await client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=receipt_handle)
         except ClientError as e:
             self._raise(e)
-        else:
+        finally:
             self._pending.pop(receipt_handle, None)
 
     async def get_queue_depth(self) -> int:
