@@ -160,8 +160,7 @@ class CacheBackend(ABC):
             async with cache.pipeline() as pipe:
                 pipe.sadd("k", "m")
                 pipe.expire("k", 60)
-            # commands execute on context exit; results available via
-            # ``await pipe.execute()`` if called explicitly inside the block.
+            # commands execute on context exit
 
         The default implementation queues calls and replays them sequentially
         on exit — it provides no atomicity and no round-trip savings. Redis

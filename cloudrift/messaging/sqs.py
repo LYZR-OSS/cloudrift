@@ -191,6 +191,15 @@ class AWSSQSBackend(MessagingBackend):
             self._pending.pop(receipt_handle, None)
 
     async def dead_letter(self, receipt_handle: str, reason: str) -> None:
+        """Emulated dead-letter for SQS: sends to DLQ then deletes from source.
+
+        Warning: these are two separate API calls with no cross-queue
+        transaction. If the process dies between them (or the DLQ send
+        succeeds but the delete fails), the message may appear in both
+        queues (double-processed) or in neither (lost). For strict
+        dead-lettering, prefer the native SQS redrive policy and let the
+        service move the message after maxReceiveCount is reached.
+        """
         client = await self._ensure()
         body = self._pending.get(receipt_handle)
         if body is None:
