@@ -36,6 +36,7 @@ Documentation = "https://github.com/LYZR-OSS/cloudrift#readme"
 aws = [
     "aioboto3>=13.0.0",       # native async S3 / SQS / SNS / Secrets Manager / SES
     "motor>=3.3.0",           # async MongoDB driver for DocumentDB
+    "pymongo>=4.5.0",         # sync MongoDB driver (optional sync client)
     "redis[hiredis]>=5.0.0",  # ElastiCache (also used by standalone)
 ]
 azure = [
@@ -46,6 +47,7 @@ azure = [
     "azure-eventgrid>=4.9.0",
     "azure-communication-email>=1.0.0",
     "motor>=3.3.0",           # Cosmos DB via MongoDB API
+    "pymongo>=4.5.0",         # sync MongoDB driver (optional sync client)
     "redis[hiredis]>=5.0.0",  # Azure Cache for Redis
 ]
 cache = [
@@ -57,6 +59,7 @@ email = [
 all = [
     "aioboto3>=13.0.0",
     "motor>=3.3.0",
+    "pymongo>=4.5.0",
     "azure-storage-blob>=12.19.0",
     "azure-servicebus>=7.11.0",
     "azure-identity>=1.15.0",
