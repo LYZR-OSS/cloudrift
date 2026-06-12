@@ -134,6 +134,7 @@ class AWSSQSBackend(MessagingBackend):
     async def close(self) -> None:
         client_cm, self._client_cm = self._client_cm, None
         self._client = None
+        self._pending.clear()
         if client_cm is not None:
             await client_cm.__aexit__(None, None, None)
 
@@ -237,6 +238,7 @@ class AWSSQSBackend(MessagingBackend):
             for m in response.get("Messages", []):
                 attrs = m.get("Attributes", {})
                 receive_count = attrs.get("ApproximateReceiveCount")
+                self._pending[m["ReceiptHandle"]] = m["Body"]
                 messages.append(
                     Message(
                         id=m["MessageId"],
@@ -263,6 +265,9 @@ class AWSSQSBackend(MessagingBackend):
             )
         except ClientError as e:
             self._raise(e)
+        finally:
+            # the handle goes stale on redelivery; redelivery stores a new one
+            self._pending.pop(receipt_handle, None)
 
     async def delete(self, receipt_handle: str) -> None:
         client = await self._ensure()
@@ -344,6 +349,7 @@ class AWSSQSBackend(MessagingBackend):
         client = await self._ensure()
         try:
             await client.purge_queue(QueueUrl=self.queue_url)
+            self._pending.clear()
         except ClientError as e:
             self._raise(e)
 

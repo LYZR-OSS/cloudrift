@@ -198,6 +198,48 @@ async def test_nack_unknown_handle_raises():
         await backend.nack("missing")
 
 
+async def test_dead_letter_calls_dead_letter_message_and_releases():
+    backend = _make_backend(session_enabled=True)
+    client = MagicMock()
+    receiver = AsyncMock()
+    raw = _make_received_message(lock_token="tok-dl")
+    receiver.receive_messages.return_value = [raw]
+    client.get_queue_receiver.return_value = receiver
+    _patch_client(backend, client)
+
+    [m] = await backend.receive()
+    await backend.dead_letter(m.receipt_handle, reason="schema mismatch")
+
+    receiver.dead_letter_message.assert_awaited_once_with(
+        raw, reason="schema mismatch", error_description="schema mismatch"
+    )
+    assert backend._pending == {}
+    assert backend._receiver_tokens == {}
+    receiver.__aexit__.assert_awaited()
+
+
+async def test_dead_letter_unknown_handle_raises():
+    backend = _make_backend()
+    with pytest.raises(MessagingError, match="No pending message"):
+        await backend.dead_letter("missing", reason="x")
+
+
+async def test_get_queue_depth_uses_admin_client():
+    backend = _make_backend()
+    props = MagicMock()
+    props.active_message_count = 5
+    admin = AsyncMock()
+    admin.get_queue_runtime_properties.return_value = props
+    admin.__aenter__.return_value = admin
+    with patch(
+        "azure.servicebus.aio.management.ServiceBusAdministrationClient"
+    ) as admin_cls:
+        admin_cls.from_connection_string.return_value = admin
+        depth = await backend.get_queue_depth()
+    assert depth == 5
+    admin.get_queue_runtime_properties.assert_awaited_once_with("test-queue")
+
+
 async def test_session_enabled_threads_through_factories():
     with patch("azure.identity.aio.ManagedIdentityCredential"):
         b = AzureServiceBusBackend.from_managed_identity(
