@@ -118,6 +118,52 @@ async def test_hdel(cache):
 
 
 # ---------------------------------------------------------------------------
+# Set commands
+# ---------------------------------------------------------------------------
+
+async def test_sadd_returns_newly_added(cache):
+    assert await cache.sadd("s", b"a", b"b") == 2
+    # adding an existing member does not count as new
+    assert await cache.sadd("s", b"a", b"c") == 1
+
+
+async def test_smembers_and_scard(cache):
+    await cache.sadd("s2", b"x", b"y", b"z")
+    assert await cache.smembers("s2") == {b"x", b"y", b"z"}
+    assert await cache.scard("s2") == 3
+
+
+async def test_srem_and_sismember(cache):
+    await cache.sadd("s3", b"a", b"b")
+    assert await cache.sismember("s3", b"a")
+    assert await cache.srem("s3", b"a") == 1
+    assert not await cache.sismember("s3", b"a")
+
+
+async def test_sinter(cache):
+    await cache.sadd("set_a", b"1", b"2", b"3")
+    await cache.sadd("set_b", b"2", b"3", b"4")
+    await cache.sadd("set_c", b"3", b"4", b"5")
+    assert await cache.sinter("set_a", "set_b") == {b"2", b"3"}
+    assert await cache.sinter("set_a", "set_b", "set_c") == {b"3"}
+
+
+async def test_sinter_single_key_equals_smembers(cache):
+    await cache.sadd("only", b"a", b"b")
+    assert await cache.sinter("only") == await cache.smembers("only")
+
+
+async def test_sinter_missing_key_is_empty(cache):
+    await cache.sadd("present", b"a", b"b")
+    assert await cache.sinter("present", "absent") == set()
+
+
+async def test_sinter_no_keys_raises(cache):
+    with pytest.raises(ValueError, match="at least one key"):
+        await cache.sinter()
+
+
+# ---------------------------------------------------------------------------
 # List commands
 # ---------------------------------------------------------------------------
 

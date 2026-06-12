@@ -250,6 +250,25 @@ client.close()
 > factories for Cosmos that called the SQL API; those have been removed
 > in favour of a single Motor-based path.
 
+### Optional sync client
+
+For services that don't run an event loop, `get_mongodb_sync(...)` returns a
+blocking [PyMongo](https://pymongo.readthedocs.io/) `MongoClient` — the sync
+driver Motor wraps — with identical provider and auth routing:
+
+```python
+from cloudrift.document import get_mongodb_sync
+
+client = get_mongodb_sync("documentdb", uri="mongodb://...")
+client = get_mongodb_sync("cosmos", account="myacct", account_key="...")
+
+users = client["lyzr"]["users"]
+users.insert_one({"name": "Alice"})
+doc = users.find_one({"name": "Alice"})
+
+client.close()
+```
+
 ---
 
 ## Cache

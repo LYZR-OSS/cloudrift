@@ -1,3 +1,5 @@
+import json
+
 import boto3
 import pytest
 from moto.server import ThreadedMotoServer
@@ -20,15 +22,32 @@ def moto_server():
 
 
 @pytest.fixture
-async def sqs_backend(moto_server):
-    sqs = boto3.client(
+def sqs_client(moto_server):
+    return boto3.client(
         "sqs",
         region_name=REGION,
         endpoint_url=moto_server,
         aws_access_key_id="test",
         aws_secret_access_key="test",
     )
-    queue_url = sqs.create_queue(QueueName=QUEUE_NAME)["QueueUrl"]
+
+
+@pytest.fixture
+async def sqs_backend(moto_server, sqs_client):
+    # Create a DLQ and wire the source queue to it via RedrivePolicy so
+    # dead_letter() can resolve the target from the queue itself.
+    dlq_url = sqs_client.create_queue(QueueName=DLQ_NAME)["QueueUrl"]
+    dlq_arn = sqs_client.get_queue_attributes(
+        QueueUrl=dlq_url, AttributeNames=["QueueArn"]
+    )["Attributes"]["QueueArn"]
+    queue_url = sqs_client.create_queue(
+        QueueName=QUEUE_NAME,
+        Attributes={
+            "RedrivePolicy": json.dumps(
+                {"deadLetterTargetArn": dlq_arn, "maxReceiveCount": "5"}
+            )
+        },
+    )["QueueUrl"]
     backend = get_queue(
         "sqs",
         queue_url=queue_url,
@@ -37,9 +56,11 @@ async def sqs_backend(moto_server):
         region=REGION,
         endpoint_url=moto_server,
     )
+    backend._dlq_test_url = dlq_url  # expose for assertions
     yield backend
     await backend.close()
-    sqs.delete_queue(QueueUrl=queue_url)
+    sqs_client.delete_queue(QueueUrl=queue_url)
+    sqs_client.delete_queue(QueueUrl=dlq_url)
 
 
 async def test_send_and_receive(sqs_backend):

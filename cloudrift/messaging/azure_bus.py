@@ -346,6 +346,55 @@ class AzureServiceBusBackend(MessagingBackend):
         finally:
             await self._release_token(receipt_handle, receiver)
 
+    async def dead_letter(self, receipt_handle: str, reason: str) -> None:
+        entry = self._pending.pop(receipt_handle, None)
+        if entry is None:
+            raise MessagingError(
+                f"No pending message for receipt handle: {receipt_handle!r}. "
+                "Call receive() first and use the returned receipt_handle."
+            )
+        receiver, message = entry
+        try:
+            await receiver.dead_letter_message(
+                message, reason=reason, error_description=reason
+            )
+        except ResourceNotFoundError as e:
+            raise QueueNotFoundError(str(e)) from e
+        except HttpResponseError as e:
+            raise MessagingError(str(e)) from e
+        finally:
+            rid = id(receiver)
+            if rid in self._receiver_tokens:
+                _, token_set = self._receiver_tokens[rid]
+                token_set.discard(receipt_handle)
+                if not token_set:
+                    try:
+                        await receiver.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                    del self._receiver_tokens[rid]
+
+    async def get_queue_depth(self) -> int:
+        # Message counts live on the management plane, not the data plane. The
+        # async admin client lives at azure.servicebus.aio.management (note: NOT
+        # azure.servicebus.management.aio) and accepts the same async credential.
+        from azure.servicebus.aio.management import ServiceBusAdministrationClient
+
+        if self._connection_string:
+            admin = ServiceBusAdministrationClient.from_connection_string(
+                self._connection_string
+            )
+        else:
+            admin = ServiceBusAdministrationClient(self._namespace, credential=self._credential)
+        try:
+            async with admin:
+                props = await admin.get_queue_runtime_properties(self.queue_name)
+                return props.active_message_count
+        except ResourceNotFoundError as e:
+            raise QueueNotFoundError(f"Queue not found: {self.queue_name}") from e
+        except HttpResponseError as e:
+            raise MessagingError(str(e)) from e
+
     async def health_check(self) -> bool:
         try:
             client = await self._ensure()
