@@ -6,7 +6,7 @@ from cloudrift.secrets import get_secrets
 from cloudrift.pubsub import get_pubsub
 from cloudrift.email import get_email
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 __all__ = [
     "get_storage",
     "get_queue",

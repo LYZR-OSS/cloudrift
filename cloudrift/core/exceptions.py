@@ -28,6 +28,11 @@ class MessageSendError(MessagingError):
     """Raised when a message fails to send."""
 
 
+class FeatureNotSupportedError(MessagingError):
+    """Raised when the backend or queue type does not support the requested
+    feature (e.g. per-message delay on SQS FIFO, receive-by-group on SQS)."""
+
+
 # Document DB exceptions
 class DocumentConnectionError(CloudRiftError):
     """Raised when a document database connection cannot be established."""
