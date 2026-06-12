@@ -9,6 +9,7 @@ from cloudrift.messaging import get_queue
 
 REGION = "us-east-1"
 QUEUE_NAME = "test-queue"
+DLQ_NAME = "test-queue-dlq"
 FIFO_QUEUE_NAME = "test-queue.fifo"
 
 
@@ -114,6 +115,110 @@ async def test_standard_queue_zero_delay_omits_delay_seconds(sqs_backend):
 async def test_group_id_on_standard_queue_raises(sqs_backend):
     with pytest.raises(FeatureNotSupportedError):
         await sqs_backend.send({"x": 1}, group_id="g1")
+
+
+# --- dead_letter / get_queue_depth ---
+
+
+async def test_dead_letter_moves_message_to_dlq(sqs_backend, sqs_client):
+    await sqs_backend.send({"poison": True, "id": 7})
+    [m] = await sqs_backend.receive(max_messages=1)
+
+    await sqs_backend.dead_letter(m.receipt_handle, reason="schema mismatch")
+
+    # gone from the source queue (and from the pending map)
+    assert await sqs_backend.receive(max_messages=10) == []
+    assert m.receipt_handle not in sqs_backend._pending
+
+    # present on the DLQ with the original body and the reason attribute
+    resp = sqs_client.receive_message(
+        QueueUrl=sqs_backend._dlq_test_url,
+        MaxNumberOfMessages=1,
+        MessageAttributeNames=["All"],
+    )
+    dlq_messages = resp.get("Messages", [])
+    assert len(dlq_messages) == 1
+    assert json.loads(dlq_messages[0]["Body"]) == {"poison": True, "id": 7}
+    reason_attr = dlq_messages[0]["MessageAttributes"]["DeadLetterReason"]
+    assert reason_attr["StringValue"] == "schema mismatch"
+    sqs_client.delete_message(
+        QueueUrl=sqs_backend._dlq_test_url,
+        ReceiptHandle=dlq_messages[0]["ReceiptHandle"],
+    )
+
+
+async def test_dead_letter_unknown_handle_raises(sqs_backend):
+    from cloudrift.core.exceptions import MessagingError
+
+    with pytest.raises(MessagingError, match="No pending message"):
+        await sqs_backend.dead_letter("bogus-handle", reason="x")
+
+
+async def test_dead_letter_without_dlq_raises(moto_server, sqs_client):
+    """A queue with no RedrivePolicy and no explicit dlq_url cannot dead-letter."""
+    from cloudrift.core.exceptions import MessagingError
+
+    queue_url = sqs_client.create_queue(QueueName="no-dlq-queue")["QueueUrl"]
+    backend = get_queue(
+        "sqs",
+        queue_url=queue_url,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region=REGION,
+        endpoint_url=moto_server,
+    )
+    try:
+        await backend.send({"x": 1})
+        [m] = await backend.receive(max_messages=1)
+        with pytest.raises(MessagingError, match="No dead-letter queue configured"):
+            await backend.dead_letter(m.receipt_handle, reason="x")
+    finally:
+        await backend.close()
+        sqs_client.delete_queue(QueueUrl=queue_url)
+
+
+async def test_dead_letter_with_explicit_dlq_url(moto_server, sqs_client):
+    """dlq_url= passed at construction wins over RedrivePolicy resolution."""
+    dlq_url = sqs_client.create_queue(QueueName="explicit-dlq")["QueueUrl"]
+    queue_url = sqs_client.create_queue(QueueName="explicit-src")["QueueUrl"]
+    backend = get_queue(
+        "sqs",
+        queue_url=queue_url,
+        dlq_url=dlq_url,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region=REGION,
+        endpoint_url=moto_server,
+    )
+    try:
+        await backend.send({"n": 1})
+        [m] = await backend.receive(max_messages=1)
+        await backend.dead_letter(m.receipt_handle, reason="explicit")
+        resp = sqs_client.receive_message(QueueUrl=dlq_url, MaxNumberOfMessages=1)
+        assert json.loads(resp["Messages"][0]["Body"]) == {"n": 1}
+    finally:
+        await backend.close()
+        sqs_client.delete_queue(QueueUrl=queue_url)
+        sqs_client.delete_queue(QueueUrl=dlq_url)
+
+
+async def test_nack_drops_pending_entry(sqs_backend):
+    await sqs_backend.send({"retry": 1})
+    [m] = await sqs_backend.receive(max_messages=1)
+    assert m.receipt_handle in sqs_backend._pending
+    await sqs_backend.nack(m.receipt_handle)
+    assert m.receipt_handle not in sqs_backend._pending
+    # redelivery stores a fresh handle, and dead_letter works on it
+    [again] = await sqs_backend.receive(max_messages=1)
+    await sqs_backend.dead_letter(again.receipt_handle, reason="after nack")
+
+
+async def test_get_queue_depth(sqs_backend):
+    assert await sqs_backend.get_queue_depth() == 0
+    await sqs_backend.send({"a": 1})
+    await sqs_backend.send({"b": 2})
+    assert await sqs_backend.get_queue_depth() == 2
+    await sqs_backend.purge()
 
 
 # --- FIFO tests ---
