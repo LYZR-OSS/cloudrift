@@ -1140,7 +1140,7 @@ wheels = [
 
 [[package]]
 name = "lyzr-cloudrift"
-version = "0.2.2"
+version = "0.2.3"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1182,6 +1182,7 @@ dev = [
     { name = "aiosmtplib" },
     { name = "azure-communication-email" },
     { name = "azure-identity" },
+    { name = "azure-servicebus" },
     { name = "fakeredis" },
     { name = "httpx" },
     { name = "moto", extra = ["s3", "server"] },
@@ -1220,6 +1221,7 @@ requires-dist = [
     { name = "azure-keyvault-secrets", marker = "extra == 'azure'", specifier = ">=4.7.0" },
     { name = "azure-servicebus", marker = "extra == 'all'", specifier = ">=7.11.0" },
     { name = "azure-servicebus", marker = "extra == 'azure'", specifier = ">=7.11.0" },
+    { name = "azure-servicebus", marker = "extra == 'dev'", specifier = ">=7.11.0" },
     { name = "azure-storage-blob", marker = "extra == 'all'", specifier = ">=12.19.0" },
     { name = "azure-storage-blob", marker = "extra == 'azure'", specifier = ">=12.19.0" },
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.20.0" },
