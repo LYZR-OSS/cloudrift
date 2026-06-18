@@ -1,5 +1,7 @@
 from cloudrift.cache.base import CacheBackend
 
+_VALID_SSL_CERT_REQS = ("CERT_NONE", "CERT_OPTIONAL", "CERT_REQUIRED")
+
 
 def cache_broker_url(
     provider: str,
@@ -7,7 +9,7 @@ def cache_broker_url(
     port: int,
     password: str = "",
     db: int = 0,
-    ssl_cert_reqs: str = "CERT_NONE",
+    ssl_cert_reqs: str = "CERT_REQUIRED",
 ) -> str:
     """Return a Redis URL (``redis://`` or ``rediss://``) suitable for clients
     that require URL-based configuration — most notably Celery, which cannot
@@ -24,20 +26,29 @@ def cache_broker_url(
             AUTH token / access key.
         db: Redis database index.
         ssl_cert_reqs: TLS verification mode for cloud providers. One of
-            ``CERT_NONE`` / ``CERT_OPTIONAL`` / ``CERT_REQUIRED``. Ignored when
-            ``provider == "redis"``.
+            ``CERT_NONE`` / ``CERT_OPTIONAL`` / ``CERT_REQUIRED`` (defaults to
+            ``CERT_REQUIRED``). Ignored when ``provider == "redis"``.
 
     Notes:
         Token-based auth (ElastiCache IAM, Azure Managed Identity / Service
         Principal) cannot be expressed in a static URL — for those, configure
         the consumer (e.g. Celery) with a CredentialProvider instead of a URL.
     """
+    # When a password is present, include the ``default`` username so the URL is
+    # valid against Redis 6+ ACL deployments (``redis://default:pw@host``).
+    # Without it, ``redis://:pw@host`` can silently fail to authenticate.
+    auth = f"default:{password}@" if password else ""
+
     if provider == "redis":
-        auth = f":{password}@" if password else ""
         return f"redis://{auth}{host}:{port}/{db}"
     if provider in ("elasticache", "azure_redis"):
+        if ssl_cert_reqs not in _VALID_SSL_CERT_REQS:
+            raise ValueError(
+                f"Invalid ssl_cert_reqs: {ssl_cert_reqs!r}. "
+                f"Must be one of: {', '.join(_VALID_SSL_CERT_REQS)}."
+            )
         return (
-            f"rediss://:{password}@{host}:{port}/{db}"
+            f"rediss://{auth}{host}:{port}/{db}"
             f"?ssl_cert_reqs={ssl_cert_reqs}"
         )
     raise ValueError(
