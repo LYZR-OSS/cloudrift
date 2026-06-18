@@ -11,7 +11,7 @@ def cache_broker_url(
     port: int,
     password: str = "",
     db: int = 0,
-    ssl_cert_reqs: str = "CERT_REQUIRED",
+    ssl_cert_reqs: str = "CERT_NONE",
 ) -> str:
     """Return a Redis URL (``redis://`` or ``rediss://``) suitable for clients
     that require URL-based configuration — most notably Celery, which cannot
