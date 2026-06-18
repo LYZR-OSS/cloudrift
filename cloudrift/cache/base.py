@@ -56,6 +56,24 @@ class CacheBackend(ABC):
         """Return all keys matching *pattern*. Avoid on large keyspaces in production."""
 
     @abstractmethod
+    async def scan(
+        self,
+        cursor: int = 0,
+        match: str | None = None,
+        count: int | None = None,
+    ) -> tuple[int, list[bytes]]:
+        """Incremental keyspace iteration.
+
+        Returns ``(next_cursor, keys)``. Iterate until ``next_cursor == 0``.
+        Preferred over :meth:`keys` in production: bounded per-call work.
+        """
+
+    @abstractmethod
+    async def getdel(self, key: str) -> bytes | None:
+        """Atomically get and delete *key*. Returns the value, or ``None``
+        if the key did not exist. Requires Redis ≥ 6.2."""
+
+    @abstractmethod
     async def hget(self, key: str, field: str) -> bytes | None:
         """Return the value of *field* in the hash stored at *key*."""
 
@@ -301,6 +319,29 @@ class _RedisMixin:
     async def ttl(self, key: str) -> int:
         try:
             return await self._client.ttl(key)
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+    async def scan(
+        self,
+        cursor: int = 0,
+        match: str | None = None,
+        count: int | None = None,
+    ) -> tuple[int, list[bytes]]:
+        kwargs: dict = {}
+        if match is not None:
+            kwargs["match"] = match
+        if count is not None:
+            kwargs["count"] = count
+        try:
+            next_cursor, keys = await self._client.scan(cursor=cursor, **kwargs)
+            return int(next_cursor), keys
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+    async def getdel(self, key: str) -> bytes | None:
+        try:
+            return await self._client.getdel(key)
         except RedisError as e:
             raise CacheError(str(e)) from e
 

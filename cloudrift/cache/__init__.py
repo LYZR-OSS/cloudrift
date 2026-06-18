@@ -1,4 +1,75 @@
+from urllib.parse import quote
+
 from cloudrift.cache.base import CacheBackend
+
+_VALID_SSL_CERT_REQS = ("CERT_NONE", "CERT_OPTIONAL", "CERT_REQUIRED")
+
+
+def cache_broker_url(
+    provider: str,
+    host: str,
+    port: int,
+    password: str = "",
+    db: int = 0,
+    ssl_cert_reqs: str = "CERT_NONE",
+) -> str:
+    """Return a Redis URL (``redis://`` or ``rediss://``) suitable for clients
+    that require URL-based configuration — most notably Celery, which cannot
+    consume a :class:`CacheBackend` directly.
+
+    Args:
+        provider: ``"redis"`` (self-hosted), ``"elasticache"`` (AWS), or
+            ``"azure_redis"``.
+        host: Redis host.
+        port: Redis port (6379 for plain, 6380 for TLS, 10000 for some Azure
+            tiers — pass the value the cluster actually listens on).
+        password: Optional. Omit (or pass empty string) for unauthenticated
+            self-hosted Redis. For ``elasticache`` / ``azure_redis`` this is the
+            AUTH token / access key.
+        db: Redis database index.
+        ssl_cert_reqs: TLS verification mode for cloud providers. One of
+            ``CERT_NONE`` / ``CERT_OPTIONAL`` / ``CERT_REQUIRED`` (defaults to
+            ``CERT_REQUIRED``). Ignored when ``provider == "redis"``.
+
+    Notes:
+        Token-based auth (ElastiCache IAM, Azure Managed Identity / Service
+        Principal) cannot be expressed in a static URL — for those, configure
+        the consumer (e.g. Celery) with a CredentialProvider instead of a URL.
+
+        Celery's Redis transport does not forward the ``ssl_cert_reqs`` query
+        parameter to redis-py; when used as a Celery broker URL the value is
+        silently ignored. To enforce non-default cert verification with Celery,
+        set ``broker_use_ssl`` (e.g. ``{"ssl_cert_reqs": ssl.CERT_REQUIRED}``)
+        on the Celery app config in addition to passing this URL.
+    """
+    # Validate eagerly so a bad value fails at the call site rather than at
+    # connection time — applies to every provider, even where it's unused.
+    if ssl_cert_reqs not in _VALID_SSL_CERT_REQS:
+        raise ValueError(
+            f"Invalid ssl_cert_reqs: {ssl_cert_reqs!r}. "
+            f"Must be one of: {', '.join(_VALID_SSL_CERT_REQS)}."
+        )
+    if not isinstance(db, int) or isinstance(db, bool) or db < 0:
+        raise ValueError(f"Invalid db: {db!r}. Must be a non-negative integer.")
+
+    # When a password is present, include the ``default`` username so the URL is
+    # valid against Redis 6+ ACL deployments (``redis://default:pw@host``).
+    # Without it, ``redis://:pw@host`` can silently fail to authenticate. The
+    # password is percent-encoded so special characters (@ : / ? # %) don't
+    # corrupt the URL.
+    auth = f"default:{quote(password, safe='')}@" if password else ""
+
+    if provider == "redis":
+        return f"redis://{auth}{host}:{port}/{db}"
+    if provider in ("elasticache", "azure_redis"):
+        return (
+            f"rediss://{auth}{host}:{port}/{db}"
+            f"?ssl_cert_reqs={ssl_cert_reqs}"
+        )
+    raise ValueError(
+        f"Unsupported cache provider for broker URL: {provider!r}. "
+        "Must be one of: 'redis', 'elasticache', 'azure_redis'."
+    )
 
 
 def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
@@ -40,4 +111,4 @@ def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
     return factory(**kwargs)
 
 
-__all__ = ["CacheBackend", "get_cache"]
+__all__ = ["CacheBackend", "get_cache", "cache_broker_url"]
