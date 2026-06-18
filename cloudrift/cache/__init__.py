@@ -1,3 +1,5 @@
+from urllib.parse import quote
+
 from cloudrift.cache.base import CacheBackend
 
 _VALID_SSL_CERT_REQS = ("CERT_NONE", "CERT_OPTIONAL", "CERT_REQUIRED")
@@ -33,20 +35,33 @@ def cache_broker_url(
         Token-based auth (ElastiCache IAM, Azure Managed Identity / Service
         Principal) cannot be expressed in a static URL — for those, configure
         the consumer (e.g. Celery) with a CredentialProvider instead of a URL.
+
+        Celery's Redis transport does not forward the ``ssl_cert_reqs`` query
+        parameter to redis-py; when used as a Celery broker URL the value is
+        silently ignored. To enforce non-default cert verification with Celery,
+        set ``broker_use_ssl`` (e.g. ``{"ssl_cert_reqs": ssl.CERT_REQUIRED}``)
+        on the Celery app config in addition to passing this URL.
     """
+    # Validate eagerly so a bad value fails at the call site rather than at
+    # connection time — applies to every provider, even where it's unused.
+    if ssl_cert_reqs not in _VALID_SSL_CERT_REQS:
+        raise ValueError(
+            f"Invalid ssl_cert_reqs: {ssl_cert_reqs!r}. "
+            f"Must be one of: {', '.join(_VALID_SSL_CERT_REQS)}."
+        )
+    if not isinstance(db, int) or isinstance(db, bool) or db < 0:
+        raise ValueError(f"Invalid db: {db!r}. Must be a non-negative integer.")
+
     # When a password is present, include the ``default`` username so the URL is
     # valid against Redis 6+ ACL deployments (``redis://default:pw@host``).
-    # Without it, ``redis://:pw@host`` can silently fail to authenticate.
-    auth = f"default:{password}@" if password else ""
+    # Without it, ``redis://:pw@host`` can silently fail to authenticate. The
+    # password is percent-encoded so special characters (@ : / ? # %) don't
+    # corrupt the URL.
+    auth = f"default:{quote(password, safe='')}@" if password else ""
 
     if provider == "redis":
         return f"redis://{auth}{host}:{port}/{db}"
     if provider in ("elasticache", "azure_redis"):
-        if ssl_cert_reqs not in _VALID_SSL_CERT_REQS:
-            raise ValueError(
-                f"Invalid ssl_cert_reqs: {ssl_cert_reqs!r}. "
-                f"Must be one of: {', '.join(_VALID_SSL_CERT_REQS)}."
-            )
         return (
             f"rediss://{auth}{host}:{port}/{db}"
             f"?ssl_cert_reqs={ssl_cert_reqs}"
