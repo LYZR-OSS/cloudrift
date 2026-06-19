@@ -3,10 +3,11 @@ from cloudrift.messaging import get_queue
 from cloudrift.document import get_mongodb, get_mongodb_sync
 from cloudrift.cache import get_cache, cache_broker_url
 from cloudrift.secrets import get_secrets
+from cloudrift.sql import get_sql
 from cloudrift.pubsub import get_pubsub
 from cloudrift.email import get_email
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 __all__ = [
     "get_storage",
     "get_queue",
@@ -15,6 +16,7 @@ __all__ = [
     "get_cache",
     "cache_broker_url",
     "get_secrets",
+    "get_sql",
     "get_pubsub",
     "get_email",
 ]

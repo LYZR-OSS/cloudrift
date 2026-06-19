@@ -64,6 +64,20 @@ class SecretPermissionError(SecretError):
     """Raised on secret access permission failures."""
 
 
+# SQL database exceptions
+class SQLError(CloudRiftError):
+    """Base exception for SQL database operations."""
+
+
+class SQLConnectionError(SQLError):
+    """Raised when a SQL database connection cannot be established."""
+
+
+class SQLAuthError(SQLError):
+    """Raised when SQL authentication / credential acquisition fails (e.g. an
+    Azure AD access token or RDS IAM token could not be obtained)."""
+
+
 # Pub/Sub exceptions
 class PubSubError(CloudRiftError):
     """Base exception for pub/sub operations."""

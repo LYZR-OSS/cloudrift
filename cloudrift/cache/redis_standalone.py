@@ -25,6 +25,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         cls,
         url: str,
         ssl_ca_certs: str | None = None,
+        decode_responses: bool = False,
     ) -> "StandaloneRedisBackend":
         """Connect using a Redis URL.
 
@@ -32,9 +33,12 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
             url: e.g. ``redis://user:pass@localhost:6379/0`` or
                  ``rediss://user:pass@localhost:6380/0`` (TLS).
             ssl_ca_certs: Optional path to the CA certificate bundle (PEM) for TLS.
+            decode_responses: When ``True``, read operations return ``str`` instead
+                of ``bytes`` (mirrors redis-py's ``decode_responses``). Default
+                ``False`` keeps the cache-backend contract of returning ``bytes``.
         """
         try:
-            kwargs: dict = {}
+            kwargs: dict = {"decode_responses": decode_responses}
             if ssl_ca_certs:
                 kwargs["ssl_ca_certs"] = ssl_ca_certs
             return cls(aioredis.from_url(url, **kwargs))
@@ -51,6 +55,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         db: int = 0,
         ssl: bool = False,
         ssl_ca_certs: str | None = None,
+        decode_responses: bool = False,
     ) -> "StandaloneRedisBackend":
         """Connect using explicit host, port, and optional credentials.
 
@@ -62,6 +67,8 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
             db: Database index (default 0).
             ssl: Enable TLS (default ``False``).
             ssl_ca_certs: Optional path to the CA certificate bundle (PEM).
+            decode_responses: When ``True``, read operations return ``str`` instead
+                of ``bytes`` (mirrors redis-py's ``decode_responses``).
         """
         try:
             client = aioredis.Redis(
@@ -72,6 +79,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
                 db=db,
                 ssl=ssl,
                 ssl_ca_certs=ssl_ca_certs,
+                decode_responses=decode_responses,
             )
             return cls(client)
         except Exception as e:
@@ -88,6 +96,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         ssl_certfile: str | None = None,
         ssl_keyfile: str | None = None,
         ssl_ca_certs: str | None = None,
+        decode_responses: bool = False,
     ) -> "StandaloneRedisBackend":
         """Connect using mutual TLS (mTLS) with client certificate and key files.
 
@@ -100,6 +109,8 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
             ssl_certfile: Path to the client certificate PEM file.
             ssl_keyfile: Path to the client private key PEM file.
             ssl_ca_certs: Path to the CA certificate bundle (PEM) for server verification.
+            decode_responses: When ``True``, read operations return ``str`` instead
+                of ``bytes`` (mirrors redis-py's ``decode_responses``).
         """
         try:
             client = aioredis.Redis(
@@ -112,6 +123,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
                 ssl_certfile=ssl_certfile,
                 ssl_keyfile=ssl_keyfile,
                 ssl_ca_certs=ssl_ca_certs,
+                decode_responses=decode_responses,
             )
             return cls(client)
         except Exception as e:

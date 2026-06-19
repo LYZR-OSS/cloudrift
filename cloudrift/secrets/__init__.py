@@ -5,9 +5,12 @@ def get_secrets(provider: str, **kwargs) -> SecretBackend:
     """Factory to instantiate a secret management backend.
 
     Args:
-        provider: ``"aws_secrets_manager"`` or ``"azure_keyvault"``.
-        **kwargs: Provider-specific config. The factory routes to the appropriate
-            ``from_*`` classmethod based on which credential keys are present.
+        provider: ``"aws_secrets_manager"``, ``"azure_keyvault"``, or a non-cloud
+            source — ``"env"`` (environment variables), ``"file"`` (a JSON file),
+            or ``"memory"``/``"local"`` (in-memory mapping, mainly dev/tests).
+        **kwargs: Provider-specific config. The cloud factories route to the
+            appropriate ``from_*`` classmethod based on which credential keys are
+            present; the local backends take their own simple kwargs.
 
     Returns:
         A SecretBackend instance.
@@ -19,7 +22,25 @@ def get_secrets(provider: str, **kwargs) -> SecretBackend:
         get_secrets("azure_keyvault", vault_url="https://myvault.vault.azure.net")
         get_secrets("azure_keyvault", vault_url="...", tenant_id="...",
                     client_id="...", client_secret="...")
+        get_secrets("env", prefix="SECRET_")          # read SECRET_<name> env vars
+        get_secrets("file", path="/run/secrets.json") # JSON {name: value}
+        get_secrets("memory", mapping={"db": "..."})  # in-memory (dev/tests)
     """
+    if provider == "env":
+        from cloudrift.secrets.local import EnvSecretBackend
+
+        return EnvSecretBackend(**kwargs)
+
+    if provider == "file":
+        from cloudrift.secrets.local import FileSecretBackend
+
+        return FileSecretBackend(**kwargs)
+
+    if provider in ("memory", "local"):
+        from cloudrift.secrets.local import MappingSecretBackend
+
+        return MappingSecretBackend(**kwargs)
+
     if provider == "aws_secrets_manager":
         from cloudrift.secrets.aws_secrets_manager import AWSSecretsManagerBackend
 
@@ -37,8 +58,8 @@ def get_secrets(provider: str, **kwargs) -> SecretBackend:
         return AzureKeyVaultBackend.from_managed_identity(**kwargs)
 
     raise ValueError(
-        f"Unknown secrets provider: {provider!r}. "
-        "Choose 'aws_secrets_manager' or 'azure_keyvault'."
+        f"Unknown secrets provider: {provider!r}. Choose 'aws_secrets_manager', "
+        "'azure_keyvault', 'env', 'file', or 'memory'."
     )
 
 
