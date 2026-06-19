@@ -30,6 +30,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
         db: int = 0,
         ssl: bool = True,
         ssl_ca_certs: str | None = None,
+        decode_responses: bool = False,
     ) -> "AWSElastiCacheBackend":
         """Connect using an ElastiCache AUTH token (shared secret).
 
@@ -43,6 +44,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
             db: Database index (default 0).
             ssl: Enable TLS in-transit encryption (default ``True``).
             ssl_ca_certs: Optional path to the CA bundle (PEM) for server verification.
+            decode_responses: When ``True``, reads return ``str`` instead of ``bytes``.
         """
         try:
             client = aioredis.Redis(
@@ -52,6 +54,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
                 db=db,
                 ssl=ssl,
                 ssl_ca_certs=ssl_ca_certs,
+                decode_responses=decode_responses,
             )
             return cls(client)
         except Exception as e:
@@ -71,6 +74,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
         aws_secret_access_key: str | None = None,
         aws_session_token: str | None = None,
         profile_name: str | None = None,
+        decode_responses: bool = False,
     ) -> "AWSElastiCacheBackend":
         """Connect using IAM-based authentication (ElastiCache Redis 7+ with IAM enabled).
 
@@ -108,6 +112,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
                 ssl=ssl,
                 ssl_ca_certs=ssl_ca_certs,
                 credential_provider=provider,
+                decode_responses=decode_responses,
             )
             return cls(client)
         except Exception as e:
@@ -123,6 +128,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
         ssl_certfile: str | None = None,
         ssl_keyfile: str | None = None,
         ssl_ca_certs: str | None = None,
+        decode_responses: bool = False,
     ) -> "AWSElastiCacheBackend":
         """Connect using mutual TLS (mTLS) with a client certificate and key.
 
@@ -134,6 +140,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
             ssl_certfile: Path to the client certificate PEM file.
             ssl_keyfile: Path to the client private key PEM file.
             ssl_ca_certs: Path to the CA certificate bundle (PEM) for server verification.
+            decode_responses: When ``True``, reads return ``str`` instead of ``bytes``.
         """
         try:
             client = aioredis.Redis(
@@ -145,6 +152,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
                 ssl_certfile=ssl_certfile,
                 ssl_keyfile=ssl_keyfile,
                 ssl_ca_certs=ssl_ca_certs,
+                decode_responses=decode_responses,
             )
             return cls(client)
         except Exception as e:

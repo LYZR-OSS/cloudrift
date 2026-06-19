@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lyzr-cloudrift"
-version = "0.2.4"
-description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, pub/sub, and email"
+version = "0.2.5"
+description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, SQL, pub/sub, and email"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -56,6 +56,35 @@ cache = [
 email = [
     "aiosmtplib>=3.0",        # raw SMTP backend
 ]
+# SQL connection + auth backends (one extra per engine — install only what you use).
+sql-postgres = [
+    "psycopg[binary]>=3.1",   # PostgreSQL / Redshift (async); RDS IAM needs boto3
+    "psycopg-pool>=3.2",      # opt-in connection pooling (acquire())
+]
+sql-mysql = [
+    "mysql-connector-python>=8.2",  # MySQL / Aurora MySQL (async); RDS IAM needs boto3
+]
+sql-mssql = [
+    "aioodbc>=0.4",           # MS SQL Server / Azure SQL (requires system ODBC Driver 18)
+    "cryptography>=42.0",     # self-signed certificate pinning
+    "azure-identity>=1.15.0", # Azure AD / Entra token auth
+]
+sql-oracle = [
+    "oracledb>=2.0",
+]
+sql-databricks = [
+    "databricks-sql-connector>=3.0",
+]
+sql = [
+    "psycopg[binary]>=3.1",
+    "psycopg-pool>=3.2",
+    "mysql-connector-python>=8.2",
+    "aioodbc>=0.4",
+    "cryptography>=42.0",
+    "azure-identity>=1.15.0",
+    "oracledb>=2.0",
+    "databricks-sql-connector>=3.0",
+]
 all = [
     "aioboto3>=13.0.0",
     "motor>=3.3.0",
@@ -68,6 +97,12 @@ all = [
     "azure-communication-email>=1.0.0",
     "redis[hiredis]>=5.0.0",
     "aiosmtplib>=3.0",
+    "psycopg[binary]>=3.1",
+    "mysql-connector-python>=8.2",
+    "aioodbc>=0.4",
+    "cryptography>=42.0",
+    "oracledb>=2.0",
+    "databricks-sql-connector>=3.0",
 ]
 dev = [
     "pytest>=8.0",

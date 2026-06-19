@@ -29,6 +29,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         port: int = 6380,
         db: int = 0,
         ssl: bool = True,
+        decode_responses: bool = False,
     ) -> "AzureRedisCacheBackend":
         """Authenticate with an Azure Cache for Redis access key.
 
@@ -38,6 +39,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
             port: Redis SSL port (default 6380; non-TLS is 6379).
             db: Database index (default 0).
             ssl: Enable TLS (default ``True``; required for Azure Cache for Redis).
+            decode_responses: When ``True``, reads return ``str`` instead of ``bytes``.
         """
         try:
             client = aioredis.Redis(
@@ -46,6 +48,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
                 password=access_key,
                 db=db,
                 ssl=ssl,
+                decode_responses=decode_responses,
             )
             return cls(client)
         except Exception as e:
@@ -60,6 +63,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         db: int = 0,
         ssl: bool = True,
         client_id: str | None = None,
+        decode_responses: bool = False,
     ) -> "AzureRedisCacheBackend":
         """Authenticate via Azure Managed Identity (Entra ID token auth).
 
@@ -85,6 +89,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
                 db=db,
                 ssl=ssl,
                 credential_provider=provider,
+                decode_responses=decode_responses,
             )
             return cls(client)
         except Exception as e:
@@ -103,6 +108,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         port: int = 6380,
         db: int = 0,
         ssl: bool = True,
+        decode_responses: bool = False,
     ) -> "AzureRedisCacheBackend":
         """Authenticate via Azure AD service principal (Entra ID token auth).
 
@@ -131,6 +137,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
                 db=db,
                 ssl=ssl,
                 credential_provider=provider,
+                decode_responses=decode_responses,
             )
             return cls(client)
         except Exception as e:
