@@ -1,20 +1,47 @@
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 
 @dataclass
+class OutgoingMessage:
+    """A message to send via :meth:`MessagingBackend.send_batch`.
+
+    ``body`` is the raw payload bytes; ``attributes`` is an optional flat map of
+    string metadata that maps to SQS ``MessageAttributes`` (String type) and
+    Service Bus ``application_properties``.
+    """
+
+    body: bytes
+    attributes: dict[str, str] | None = None
+
+
+@dataclass
 class Message:
     id: str
-    body: dict
+    body: bytes
     receipt_handle: str
-    attributes: dict = field(default_factory=dict)
+    attributes: dict[str, str] = field(default_factory=dict)
     group_id: str | None = None
     dedup_id: str | None = None
     receive_count: int | None = None
 
+    def json(self):
+        """Decode the raw ``body`` bytes as JSON.
+
+        Convenience for the common case where the payload was sent with
+        :func:`send_json`. Raises ``json.JSONDecodeError`` if the body is not
+        valid JSON.
+        """
+        return json.loads(self.body)
+
 
 class MessagingBackend(ABC):
     """Abstract base class for cloud messaging/queue backends.
+
+    The primitive payload is **raw bytes** plus an optional flat ``attributes``
+    map (string → string). JSON users should use the :func:`send_json` helper
+    and :meth:`Message.json` to (de)serialize without touching the byte layer.
 
     Backends hold long-lived async clients. Use ``await backend.close()`` (or
     ``async with backend:``) to release sockets cleanly.
@@ -28,27 +55,30 @@ class MessagingBackend(ABC):
     @abstractmethod
     async def send(
         self,
-        message: dict,
+        body: bytes,
+        attributes: dict[str, str] | None = None,
         delay: int = 0,
         *,
         group_id: str | None = None,
         dedup_id: str | None = None,
     ) -> str:
-        """Send a message. Returns the message ID.
+        """Send a raw-bytes message with optional attributes. Returns the message ID.
 
-        group_id/dedup_id apply to FIFO (SQS) or session-enabled (Service Bus)
-        queues. SQS FIFO does not support per-message ``delay``.
+        ``attributes`` map to SQS ``MessageAttributes`` (String type) /
+        Service Bus ``application_properties``. group_id/dedup_id apply to FIFO
+        (SQS) or session-enabled (Service Bus) queues. SQS FIFO does not support
+        per-message ``delay``.
         """
 
     @abstractmethod
     async def send_batch(
         self,
-        messages: list[dict],
+        messages: list[OutgoingMessage],
         *,
         group_id: str | None = None,
         dedup_ids: list[str] | None = None,
     ) -> list[str]:
-        """Send multiple messages. Returns list of message IDs.
+        """Send multiple :class:`OutgoingMessage`. Returns list of message IDs.
 
         ``group_id`` applies to every message; ``dedup_ids``, if given, must be
         parallel to ``messages``.
@@ -64,6 +94,10 @@ class MessagingBackend(ABC):
         visibility_timeout: int | None = None,
     ) -> list[Message]:
         """Receive messages. wait_time is long-poll duration in seconds.
+
+        Each :class:`Message` carries the raw ``body`` bytes and an
+        ``attributes`` map (string → string) populated from the provider's
+        message attributes / application properties.
 
         ``group_id`` receives from a specific session (Service Bus only; SQS
         cannot filter by group). ``visibility_timeout`` overrides the queue's
@@ -117,3 +151,27 @@ class MessagingBackend(ABC):
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
+
+
+async def send_json(
+    backend: MessagingBackend,
+    message: dict,
+    attributes: dict[str, str] | None = None,
+    delay: int = 0,
+    *,
+    group_id: str | None = None,
+    dedup_id: str | None = None,
+) -> str:
+    """Serialize ``message`` to JSON bytes and send it via ``backend``.
+
+    Backend-agnostic convenience wrapper around :meth:`MessagingBackend.send`
+    for the common JSON-payload case. Decode the received body with
+    :meth:`Message.json`.
+    """
+    return await backend.send(
+        json.dumps(message).encode(),
+        attributes,
+        delay,
+        group_id=group_id,
+        dedup_id=dedup_id,
+    )

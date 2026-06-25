@@ -12,6 +12,7 @@ from azure.servicebus.exceptions import OperationTimeoutError
 
 from cloudrift.core.exceptions import FeatureNotSupportedError, MessageSendError, MessagingError
 from cloudrift.messaging.azure_bus import AzureServiceBusBackend
+from cloudrift.messaging.base import OutgoingMessage
 
 CONN_STR = "Endpoint=sb://test.servicebus.windows.net/;SharedAccessKeyName=x;SharedAccessKey=y"
 
@@ -32,17 +33,40 @@ def _patch_client(backend, client):
     backend._client = client
 
 
-def _make_received_message(lock_token="tok-1", session_id=None, message_id="m-1",
-                           delivery_count=0, body='{"n": 1}'):
-    m = MagicMock()
-    m.lock_token = lock_token
-    m.session_id = session_id
-    m.message_id = message_id
-    m.delivery_count = delivery_count
-    m.sequence_number = 7
-    m.enqueued_time_utc = "2026-01-01"
-    m.__str__ = MagicMock(return_value=body)
-    return m
+class _FakeReceivedMessage:
+    """Minimal stand-in for ServiceBusReceivedMessage.
+
+    The real type exposes its raw payload via ``bytes(message)``; emulate that
+    deterministically (MagicMock does not reliably support ``__bytes__``).
+    """
+
+    def __init__(
+        self, lock_token, session_id, message_id, delivery_count, body, application_properties
+    ):
+        self.lock_token = lock_token
+        self.session_id = session_id
+        self.message_id = message_id
+        self.delivery_count = delivery_count
+        self.sequence_number = 7
+        self.enqueued_time_utc = "2026-01-01"
+        self.application_properties = application_properties
+        self._body = body
+
+    def __bytes__(self):
+        return self._body
+
+
+def _make_received_message(
+    lock_token="tok-1",
+    session_id=None,
+    message_id="m-1",
+    delivery_count=0,
+    body=b'{"n": 1}',
+    application_properties=None,
+):
+    return _FakeReceivedMessage(
+        lock_token, session_id, message_id, delivery_count, body, application_properties
+    )
 
 
 async def test_send_sets_session_and_message_id():
@@ -52,7 +76,7 @@ async def test_send_sets_session_and_message_id():
     client.get_queue_sender.return_value = sender
     _patch_client(backend, client)
 
-    await backend.send({"n": 1}, group_id="owner-1", dedup_id="d-1")
+    await backend.send(b'{"n": 1}', group_id="owner-1", dedup_id="d-1")
 
     sent = sender.send_messages.call_args[0][0]
     assert sent.session_id == "owner-1"
@@ -63,7 +87,7 @@ async def test_sessionless_send_to_session_queue_raises():
     backend = _make_backend(session_enabled=True)
     _patch_client(backend, MagicMock())
     with pytest.raises(MessageSendError, match="group_id is required"):
-        await backend.send({"n": 1})
+        await backend.send(b'{"n": 1}')
 
 
 async def test_send_without_session_on_plain_queue_ok():
@@ -73,9 +97,21 @@ async def test_send_without_session_on_plain_queue_ok():
     client.get_queue_sender.return_value = sender
     _patch_client(backend, client)
 
-    await backend.send({"n": 1})
+    await backend.send(b'{"n": 1}')
     sent = sender.send_messages.call_args[0][0]
     assert sent.session_id is None
+
+
+async def test_send_sets_application_properties_from_attributes():
+    backend = _make_backend(session_enabled=False)
+    client = MagicMock()
+    sender = _mock_sender()
+    client.get_queue_sender.return_value = sender
+    _patch_client(backend, client)
+
+    await backend.send(b"raw", attributes={"content_type": "text/plain"})
+    sent = sender.send_messages.call_args[0][0]
+    assert sent.application_properties == {"content_type": "text/plain"}
 
 
 async def test_send_batch_sets_per_message_dedup_ids():
@@ -88,7 +124,9 @@ async def test_send_batch_sets_per_message_dedup_ids():
     _patch_client(backend, client)
 
     ids = await backend.send_batch(
-        [{"n": 1}, {"n": 2}], group_id="g", dedup_ids=["a", "b"]
+        [OutgoingMessage(body=b'{"n": 1}'), OutgoingMessage(body=b'{"n": 2}')],
+        group_id="g",
+        dedup_ids=["a", "b"],
     )
     assert ids == ["a", "b"]
     added = [c.args[0] for c in batch.add_message.call_args_list]
@@ -145,7 +183,12 @@ async def test_receive_populates_fifo_fields():
     backend = _make_backend(session_enabled=True)
     client = MagicMock()
     receiver = AsyncMock()
-    raw = _make_received_message(session_id="owner-1", message_id="d-1", delivery_count=1)
+    raw = _make_received_message(
+        session_id="owner-1",
+        message_id="d-1",
+        delivery_count=1,
+        application_properties={b"content_type": b"text/plain"},
+    )
     receiver.receive_messages.return_value = [raw]
     client.get_queue_receiver.return_value = receiver
     _patch_client(backend, client)
@@ -154,7 +197,10 @@ async def test_receive_populates_fifo_fields():
     assert m.group_id == "owner-1"
     assert m.dedup_id == "d-1"
     assert m.receive_count == 2  # delivery_count + 1
-    assert m.body == {"n": 1}
+    assert m.body == b'{"n": 1}'
+    assert m.json() == {"n": 1}
+    # application_properties (bytes keys/values) are stringified into attributes.
+    assert m.attributes["content_type"] == "text/plain"
 
 
 async def test_nack_abandons_and_releases_receiver():
@@ -231,9 +277,7 @@ async def test_get_queue_depth_uses_admin_client():
     admin = AsyncMock()
     admin.get_queue_runtime_properties.return_value = props
     admin.__aenter__.return_value = admin
-    with patch(
-        "azure.servicebus.aio.management.ServiceBusAdministrationClient"
-    ) as admin_cls:
+    with patch("azure.servicebus.aio.management.ServiceBusAdministrationClient") as admin_cls:
         admin_cls.from_connection_string.return_value = admin
         depth = await backend.get_queue_depth()
     assert depth == 5

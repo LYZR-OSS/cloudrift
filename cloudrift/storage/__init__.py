@@ -19,6 +19,7 @@ def get_storage(provider: str, **kwargs) -> StorageBackend:
     Examples:
         get_storage("s3", bucket="my-bucket", region="us-east-1")  # IAM/env
         get_storage("s3", bucket="b", aws_access_key_id="AKIA...", aws_secret_access_key="...")
+        get_storage("s3", bucket="b", role_arn="arn:aws:iam::...:role/x", external_id="...")
         get_storage("s3", bucket="b", profile_name="dev")
         get_storage("azure_blob", connection_string="...", container="my-container")
         get_storage("azure_blob", account_url="...", account_key="...", container="c")
@@ -27,6 +28,8 @@ def get_storage(provider: str, **kwargs) -> StorageBackend:
     if provider == "s3":
         from cloudrift.storage.s3 import AWSS3Backend
 
+        if "role_arn" in kwargs:
+            return AWSS3Backend.from_assume_role(**kwargs)
         if "aws_access_key_id" in kwargs:
             return AWSS3Backend.from_access_key(**kwargs)
         if "profile_name" in kwargs:
@@ -72,6 +75,8 @@ def get_storage_client(provider: str, **kwargs):
     if provider == "s3":
         from cloudrift.storage.s3 import AWSS3Client
 
+        if "role_arn" in kwargs:
+            return AWSS3Client.from_assume_role(**kwargs)
         if "aws_access_key_id" in kwargs:
             return AWSS3Client.from_access_key(**kwargs)
         if "profile_name" in kwargs:

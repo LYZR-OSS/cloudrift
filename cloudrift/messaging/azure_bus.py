@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from azure.servicebus import NEXT_AVAILABLE_SESSION, ServiceBusMessage
@@ -12,7 +11,7 @@ from cloudrift.core.exceptions import (
     MessagingError,
     QueueNotFoundError,
 )
-from cloudrift.messaging.base import Message, MessagingBackend
+from cloudrift.messaging.base import Message, MessagingBackend, OutgoingMessage
 
 
 class AzureServiceBusBackend(MessagingBackend):
@@ -135,13 +134,9 @@ class AzureServiceBusBackend(MessagingBackend):
         async with self._lock:
             if self._client is None:
                 if self._connection_string:
-                    self._client = ServiceBusClient.from_connection_string(
-                        self._connection_string
-                    )
+                    self._client = ServiceBusClient.from_connection_string(self._connection_string)
                 else:
-                    self._client = ServiceBusClient(
-                        self._namespace, credential=self._credential
-                    )
+                    self._client = ServiceBusClient(self._namespace, credential=self._credential)
         return self._client
 
     async def close(self) -> None:
@@ -163,14 +158,19 @@ class AzureServiceBusBackend(MessagingBackend):
     # ------------------------------------------------------------------
 
     def _build_message(
-        self, message: dict, group_id: str | None, dedup_id: str | None
+        self,
+        body: bytes,
+        attributes: dict[str, str] | None,
+        group_id: str | None,
+        dedup_id: str | None,
     ) -> ServiceBusMessage:
         if self.session_enabled and not group_id:
             raise MessageSendError(
-                f"group_id is required when sending to session-enabled queue "
-                f"{self.queue_name!r}"
+                f"group_id is required when sending to session-enabled queue {self.queue_name!r}"
             )
-        sb_message = ServiceBusMessage(json.dumps(message))
+        sb_message = ServiceBusMessage(body)
+        if attributes:
+            sb_message.application_properties = dict(attributes)
         if group_id:
             sb_message.session_id = group_id
         if dedup_id:
@@ -179,14 +179,15 @@ class AzureServiceBusBackend(MessagingBackend):
 
     async def send(
         self,
-        message: dict,
+        body: bytes,
+        attributes: dict[str, str] | None = None,
         delay: int = 0,
         *,
         group_id: str | None = None,
         dedup_id: str | None = None,
     ) -> str:
         client = await self._ensure()
-        sb_message = self._build_message(message, group_id, dedup_id)
+        sb_message = self._build_message(body, attributes, group_id, dedup_id)
         try:
             async with client.get_queue_sender(self.queue_name) as sender:
                 if delay:
@@ -204,7 +205,7 @@ class AzureServiceBusBackend(MessagingBackend):
 
     async def send_batch(
         self,
-        messages: list[dict],
+        messages: list[OutgoingMessage],
         *,
         group_id: str | None = None,
         dedup_ids: list[str] | None = None,
@@ -213,7 +214,7 @@ class AzureServiceBusBackend(MessagingBackend):
         if dedup_ids is not None and len(dedup_ids) != len(messages):
             raise MessageSendError("dedup_ids must be parallel to messages")
         sb_messages = [
-            self._build_message(m, group_id, dedup_ids[i] if dedup_ids else None)
+            self._build_message(m.body, m.attributes, group_id, dedup_ids[i] if dedup_ids else None)
             for i, m in enumerate(messages)
         ]
         try:
@@ -272,15 +273,22 @@ class AzureServiceBusBackend(MessagingBackend):
                 token = str(m.lock_token)
                 self._pending[token] = (receiver, m)
                 tokens.add(token)
+                # Stringify user-defined application_properties into a flat map,
+                # alongside the broker metadata we always surface.
+                attrs: dict[str, str] = {
+                    "sequence_number": str(m.sequence_number),
+                    "enqueued_time": str(m.enqueued_time_utc),
+                }
+                for key, value in (m.application_properties or {}).items():
+                    key_str = key.decode() if isinstance(key, bytes) else str(key)
+                    val_str = value.decode() if isinstance(value, bytes) else str(value)
+                    attrs[key_str] = val_str
                 messages.append(
                     Message(
                         id=str(m.message_id or ""),
-                        body=json.loads(str(m)),
+                        body=bytes(m),
                         receipt_handle=token,
-                        attributes={
-                            "sequence_number": m.sequence_number,
-                            "enqueued_time": str(m.enqueued_time_utc),
-                        },
+                        attributes=attrs,
                         group_id=m.session_id,
                         dedup_id=str(m.message_id) if m.message_id else None,
                         receive_count=(m.delivery_count or 0) + 1,
@@ -355,9 +363,7 @@ class AzureServiceBusBackend(MessagingBackend):
             )
         receiver, message = entry
         try:
-            await receiver.dead_letter_message(
-                message, reason=reason, error_description=reason
-            )
+            await receiver.dead_letter_message(message, reason=reason, error_description=reason)
         except ResourceNotFoundError as e:
             raise QueueNotFoundError(str(e)) from e
         except HttpResponseError as e:
@@ -381,9 +387,7 @@ class AzureServiceBusBackend(MessagingBackend):
         from azure.servicebus.aio.management import ServiceBusAdministrationClient
 
         if self._connection_string:
-            admin = ServiceBusAdministrationClient.from_connection_string(
-                self._connection_string
-            )
+            admin = ServiceBusAdministrationClient.from_connection_string(self._connection_string)
         else:
             admin = ServiceBusAdministrationClient(self._namespace, credential=self._credential)
         try:
@@ -408,9 +412,7 @@ class AzureServiceBusBackend(MessagingBackend):
     async def _purge_receiver(self, receiver) -> None:
         async with receiver:
             while True:
-                messages = await receiver.receive_messages(
-                    max_message_count=100, max_wait_time=5
-                )
+                messages = await receiver.receive_messages(max_message_count=100, max_wait_time=5)
                 if not messages:
                     break
                 for msg in messages:
