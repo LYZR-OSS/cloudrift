@@ -21,9 +21,10 @@ class AWSS3Client:
     was issued from it.
 
     Use one of the class methods to construct:
-    - ``from_access_key`` — static credentials (+ optional session token for assumed roles)
-    - ``from_iam_role``   — instance profile / environment / ECS task role
-    - ``from_profile``    — named profile from ``~/.aws/credentials``
+    - ``from_access_key``  — static credentials (+ optional session token for assumed roles)
+    - ``from_iam_role``    — instance profile / environment / ECS task role
+    - ``from_profile``     — named profile from ``~/.aws/credentials``
+    - ``from_assume_role`` — STS AssumeRole into a target role (cross-account)
     """
 
     def __init__(
@@ -92,6 +93,38 @@ class AWSS3Client:
     ) -> "AWSS3Client":
         """Authenticate using a named profile from ``~/.aws/credentials``."""
         session = aioboto3.Session(profile_name=profile_name, region_name=region)
+        return cls(session, endpoint_url=endpoint_url, **kwargs)
+
+    @classmethod
+    def from_assume_role(
+        cls,
+        role_arn: str,
+        external_id: str | None = None,
+        region: str = "us-east-1",
+        session_name: str = "cloudrift-s3",
+        endpoint_url: str | None = None,
+        **kwargs,
+    ) -> "AWSS3Client":
+        """Authenticate by assuming an IAM role via STS (cross-account access).
+
+        Calls ``sts:AssumeRole`` (optionally with ``ExternalId``) using the
+        ambient credential chain, then builds the S3 session from the returned
+        temporary credentials. Note: the temporary credentials are not
+        auto-refreshed; construct a new client if the session expires.
+        """
+        import boto3
+
+        sts = boto3.client("sts", region_name=region)
+        params: dict = {"RoleArn": role_arn, "RoleSessionName": session_name}
+        if external_id:
+            params["ExternalId"] = external_id
+        creds = sts.assume_role(**params)["Credentials"]
+        session = aioboto3.Session(
+            aws_access_key_id=creds["AccessKeyId"],
+            aws_secret_access_key=creds["SecretAccessKey"],
+            aws_session_token=creds["SessionToken"],
+            region_name=region,
+        )
         return cls(session, endpoint_url=endpoint_url, **kwargs)
 
     # ------------------------------------------------------------------
@@ -214,6 +247,27 @@ class AWSS3Backend(StorageBackend):
     ) -> "AWSS3Backend":
         client = AWSS3Client.from_profile(
             profile_name=profile_name, region=region, endpoint_url=endpoint_url, **kwargs
+        )
+        return cls(bucket, client, owns_client=True)
+
+    @classmethod
+    def from_assume_role(
+        cls,
+        bucket: str,
+        role_arn: str,
+        external_id: str | None = None,
+        region: str = "us-east-1",
+        session_name: str = "cloudrift-s3",
+        endpoint_url: str | None = None,
+        **kwargs,
+    ) -> "AWSS3Backend":
+        client = AWSS3Client.from_assume_role(
+            role_arn=role_arn,
+            external_id=external_id,
+            region=region,
+            session_name=session_name,
+            endpoint_url=endpoint_url,
+            **kwargs,
         )
         return cls(bucket, client, owns_client=True)
 

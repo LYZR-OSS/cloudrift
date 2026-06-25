@@ -78,6 +78,19 @@ class SQLAuthError(SQLError):
     Azure AD access token or RDS IAM token could not be obtained)."""
 
 
+# Crypto (KMS / Key Vault keys) exceptions
+class CryptoError(CloudRiftError):
+    """Base exception for cryptographic (KMS / Key Vault) operations."""
+
+
+class CryptoKeyNotFoundError(CryptoError):
+    """Raised when the referenced key does not exist or is unavailable."""
+
+
+class CryptoPermissionError(CryptoError):
+    """Raised on key access / crypto-operation permission failures."""
+
+
 # Pub/Sub exceptions
 class PubSubError(CloudRiftError):
     """Base exception for pub/sub operations."""

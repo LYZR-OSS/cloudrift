@@ -347,6 +347,21 @@ wheels = [
 ]
 
 [[package]]
+name = "azure-keyvault-keys"
+version = "4.11.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+    { name = "cryptography" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f4/03/5ce6db28b545427d4ab572f6a4ef2a727b6b4e7bf6941cedddf98822535b/azure_keyvault_keys-4.11.1.tar.gz", hash = "sha256:90caa3a7b2c8f6b53c247ec115cf1c1dad7f107cc3aa9f35aff4838bbce7e562", size = 260915, upload-time = "2026-05-19T20:01:08.041Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/3d/7bed91ae9268cf48124cf6990d8cd2c3daff7a2bb1e91a439d26ee90d705/azure_keyvault_keys-4.11.1-py3-none-any.whl", hash = "sha256:f46cdf6ee7a9baf27f70e6838327032886c8a087041dd56397773b1639da8fe2", size = 200651, upload-time = "2026-05-19T20:01:09.809Z" },
+]
+
+[[package]]
 name = "azure-keyvault-secrets"
 version = "4.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1193,7 +1208,7 @@ wheels = [
 
 [[package]]
 name = "lyzr-cloudrift"
-version = "0.2.5"
+version = "0.2.6"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1204,6 +1219,7 @@ all = [
     { name = "azure-communication-email" },
     { name = "azure-eventgrid" },
     { name = "azure-identity" },
+    { name = "azure-keyvault-keys" },
     { name = "azure-keyvault-secrets" },
     { name = "azure-servicebus" },
     { name = "azure-storage-blob" },
@@ -1226,6 +1242,7 @@ azure = [
     { name = "azure-communication-email" },
     { name = "azure-eventgrid" },
     { name = "azure-identity" },
+    { name = "azure-keyvault-keys" },
     { name = "azure-keyvault-secrets" },
     { name = "azure-servicebus" },
     { name = "azure-storage-blob" },
@@ -1241,6 +1258,7 @@ dev = [
     { name = "aiosmtplib" },
     { name = "azure-communication-email" },
     { name = "azure-identity" },
+    { name = "azure-keyvault-keys" },
     { name = "azure-servicebus" },
     { name = "fakeredis" },
     { name = "httpx" },
@@ -1309,6 +1327,9 @@ requires-dist = [
     { name = "azure-identity", marker = "extra == 'dev'", specifier = ">=1.15.0" },
     { name = "azure-identity", marker = "extra == 'sql'", specifier = ">=1.15.0" },
     { name = "azure-identity", marker = "extra == 'sql-mssql'", specifier = ">=1.15.0" },
+    { name = "azure-keyvault-keys", marker = "extra == 'all'", specifier = ">=4.8.0" },
+    { name = "azure-keyvault-keys", marker = "extra == 'azure'", specifier = ">=4.8.0" },
+    { name = "azure-keyvault-keys", marker = "extra == 'dev'", specifier = ">=4.8.0" },
     { name = "azure-keyvault-secrets", marker = "extra == 'all'", specifier = ">=4.7.0" },
     { name = "azure-keyvault-secrets", marker = "extra == 'azure'", specifier = ">=4.7.0" },
     { name = "azure-servicebus", marker = "extra == 'all'", specifier = ">=7.11.0" },
@@ -1324,7 +1345,7 @@ requires-dist = [
     { name = "databricks-sql-connector", marker = "extra == 'sql-databricks'", specifier = ">=3.0" },
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.20.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
-    { name = "moto", extras = ["s3", "sqs", "sns", "ses", "secretsmanager", "server"], marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "moto", extras = ["s3", "sqs", "sns", "ses", "secretsmanager", "kms", "server"], marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "motor", marker = "extra == 'all'", specifier = ">=3.3.0" },
     { name = "motor", marker = "extra == 'aws'", specifier = ">=3.3.0" },
     { name = "motor", marker = "extra == 'azure'", specifier = ">=3.3.0" },

@@ -278,6 +278,66 @@ async def test_view_close_is_noop_when_shared(s3_client_two_buckets):
     assert await view_b.exists("b.txt")
 
 
+# --- Assume-role auth (STS) ---
+
+
+async def test_get_storage_routes_role_arn_to_assume_role():
+    """role_arn in kwargs routes get_storage -> from_assume_role (STS path)."""
+    from unittest.mock import MagicMock, patch
+
+    from cloudrift.storage.s3 import AWSS3Backend
+
+    fake_sts = MagicMock()
+    fake_sts.assume_role.return_value = {
+        "Credentials": {
+            "AccessKeyId": "ASIA-TEMP",
+            "SecretAccessKey": "temp-secret",
+            "SessionToken": "temp-token",
+        }
+    }
+    with patch("boto3.client", return_value=fake_sts) as boto_client:
+        backend = get_storage(
+            "s3",
+            bucket="b",
+            role_arn="arn:aws:iam::123456789012:role/cross",
+            external_id="ext-42",
+            region=REGION,
+        )
+    assert isinstance(backend, AWSS3Backend)
+    boto_client.assert_called_once_with("sts", region_name=REGION)
+    call_kwargs = fake_sts.assume_role.call_args.kwargs
+    assert call_kwargs["RoleArn"] == "arn:aws:iam::123456789012:role/cross"
+    assert call_kwargs["ExternalId"] == "ext-42"
+    # Temp credentials from STS are threaded into the aioboto3 session.
+    creds = await backend._client._session.get_credentials()
+    frozen = await creds.get_frozen_credentials()
+    assert frozen.access_key == "ASIA-TEMP"
+    assert frozen.token == "temp-token"
+
+
+def test_get_storage_client_routes_role_arn_to_assume_role():
+    from unittest.mock import MagicMock, patch
+
+    from cloudrift.storage.s3 import AWSS3Client
+
+    fake_sts = MagicMock()
+    fake_sts.assume_role.return_value = {
+        "Credentials": {
+            "AccessKeyId": "ASIA-X",
+            "SecretAccessKey": "s",
+            "SessionToken": "t",
+        }
+    }
+    with patch("boto3.client", return_value=fake_sts):
+        client = get_storage_client(
+            "s3",
+            role_arn="arn:aws:iam::123456789012:role/cross",
+            region=REGION,
+        )
+    assert isinstance(client, AWSS3Client)
+    assert "ExternalId" not in fake_sts.assume_role.call_args.kwargs
+
+
 async def test_get_storage_view_owns_client_and_closes_it(moto_server):
     """A backend obtained from get_storage() owns its client and closes it."""
     bucket = "owned-close-test"

@@ -98,6 +98,9 @@ s3 = get_storage("s3", bucket="b", region="us-east-1")                       # I
 s3 = get_storage("s3", bucket="b", aws_access_key_id="...",                  # static keys
                  aws_secret_access_key="...", region="us-east-1")
 s3 = get_storage("s3", bucket="b", profile_name="dev")                       # ~/.aws/credentials
+s3 = get_storage("s3", bucket="b",                                           # STS AssumeRole
+                 role_arn="arn:aws:iam::123456789012:role/cross",
+                 external_id="my-external-id", region="us-east-1")
 
 # Azure Blob
 blob = get_storage("azure_blob", connection_string="...", container="c")
@@ -132,21 +135,38 @@ from cloudrift.messaging import get_queue
 sqs = get_queue("sqs", queue_url="https://sqs.us-east-1.amazonaws.com/.../q",
                 region="us-east-1")
 
+# AWS SQS via STS AssumeRole (cross-account)
+sqs = get_queue("sqs", queue_url="https://sqs.../q",
+                role_arn="arn:aws:iam::123456789012:role/cross-account",
+                external_id="my-external-id", region="us-east-1")
+
 # Azure Service Bus
 bus = get_queue("azure_bus", connection_string="...", queue_name="my-queue")
 bus = get_queue("azure_bus", fully_qualified_namespace="ns.servicebus.windows.net",
                 queue_name="my-queue")  # managed identity
 ```
 
-**Operations**:
+**Operations** — the payload primitive is **raw bytes** plus an optional flat
+`attributes` map (string → string). Attributes map to SQS `MessageAttributes`
+(String type) / Service Bus `application_properties`:
 
 ```python
-msg_id = await queue.send({"action": "process", "id": 42}, delay=0)
-ids = await queue.send_batch([{"n": 1}, {"n": 2}])
+from cloudrift.messaging import OutgoingMessage, send_json
+
+# Raw bytes + attributes
+msg_id = await queue.send(b"raw payload", attributes={"content_type": "text/plain"})
+ids = await queue.send_batch([
+    OutgoingMessage(body=b"a", attributes={"k": "1"}),
+    OutgoingMessage(body=b"b"),
+])
+
+# JSON convenience: send_json() dumps+encodes, m.json() loads the bytes body
+await send_json(queue, {"action": "process", "id": 42}, attributes={"v": "1"})
 
 messages = await queue.receive(max_messages=10, wait_time=20)   # long-poll
 for m in messages:
-    handle_job(m.body)
+    handle_job(m.json())         # or m.body for the raw bytes
+    print(m.attributes)          # str -> str map
     await queue.delete(m.receipt_handle)   # ack
     # or: await queue.nack(m.receipt_handle)  # return for immediate redelivery
 
@@ -168,13 +188,13 @@ queues, pass `group_id` (ordering key) and `dedup_id` (deduplication key):
 # SQS FIFO — group_id is required, dedup_id optional if the queue has
 # content-based deduplication enabled
 fifo = get_queue("sqs", queue_url="https://sqs.../jobs.fifo", region="us-east-1")
-await fifo.send({"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
+await send_json(fifo, {"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
 
 # Azure Service Bus — queue must be created with sessions enabled;
 # pass session_enabled=True so the backend uses session receivers
 bus = get_queue("azure_bus", connection_string="...", queue_name="jobs",
                 session_enabled=True)
-await bus.send({"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
+await send_json(bus, {"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
 
 messages = await fifo.receive(max_messages=10, wait_time=20, visibility_timeout=300)
 for m in messages:
