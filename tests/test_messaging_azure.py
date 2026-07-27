@@ -8,9 +8,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from azure.servicebus import NEXT_AVAILABLE_SESSION
-from azure.servicebus.exceptions import OperationTimeoutError
+from azure.servicebus.exceptions import (
+    MessageSizeExceededError,
+    MessagingEntityNotFoundError,
+    OperationTimeoutError,
+    ServiceBusConnectionError,
+    ServiceBusError,
+)
 
-from cloudrift.core.exceptions import FeatureNotSupportedError, MessageSendError, MessagingError
+from cloudrift.core.exceptions import (
+    FeatureNotSupportedError,
+    MessageSendError,
+    MessagingError,
+    QueueNotFoundError,
+)
 from cloudrift.messaging.azure_bus import AzureServiceBusBackend
 from cloudrift.messaging.base import OutgoingMessage
 
@@ -24,13 +35,24 @@ def _make_backend(session_enabled=False):
 
 
 def _mock_sender():
-    sender = AsyncMock()
-    sender.__aenter__.return_value = sender
-    return sender
+    # The backend caches the sender and never enters it as a context manager —
+    # `async with sender` would close the link on every send.
+    return AsyncMock()
 
 
 def _patch_client(backend, client):
     backend._client = client
+
+
+def _sending_backend(session_enabled=False, sender=None):
+    """Backend wired to a mock client whose get_queue_sender returns `sender`."""
+    backend = _make_backend(session_enabled=session_enabled)
+    client = MagicMock()
+    client.close = AsyncMock()
+    sender = sender or _mock_sender()
+    client.get_queue_sender.return_value = sender
+    _patch_client(backend, client)
+    return backend, client, sender
 
 
 class _FakeReceivedMessage:
@@ -70,61 +92,63 @@ def _make_received_message(
 
 
 async def test_send_sets_session_and_message_id():
-    backend = _make_backend(session_enabled=True)
-    client = MagicMock()
-    sender = _mock_sender()
-    client.get_queue_sender.return_value = sender
-    _patch_client(backend, client)
+    backend, _, sender = _sending_backend(session_enabled=True)
 
-    await backend.send(b'{"n": 1}', group_id="owner-1", dedup_id="d-1")
+    await backend.send({"n": 1}, group_id="owner-1", dedup_id="d-1")
 
     sent = sender.send_messages.call_args[0][0]
     assert sent.session_id == "owner-1"
     assert sent.message_id == "d-1"
 
 
+async def test_send_serializes_dict_to_json_body():
+    """The ABC hands the backend a JSON string; the SDK encodes it to the same bytes."""
+    backend, _, sender = _sending_backend()
+
+    await backend.send({"n": 1, "s": "café"})
+
+    sent = sender.send_messages.call_args[0][0]
+    assert b"".join(sent.body) == b'{"n": 1, "s": "caf\\u00e9"}'
+
+
+async def test_send_rejects_non_dict_payload():
+    backend, _, sender = _sending_backend()
+    with pytest.raises(TypeError, match="got bytes"):
+        await backend.send(b'{"n": 1}')
+    sender.send_messages.assert_not_awaited()
+
+
 async def test_sessionless_send_to_session_queue_raises():
     backend = _make_backend(session_enabled=True)
     _patch_client(backend, MagicMock())
     with pytest.raises(MessageSendError, match="group_id is required"):
-        await backend.send(b'{"n": 1}')
+        await backend.send({"n": 1})
 
 
 async def test_send_without_session_on_plain_queue_ok():
-    backend = _make_backend(session_enabled=False)
-    client = MagicMock()
-    sender = _mock_sender()
-    client.get_queue_sender.return_value = sender
-    _patch_client(backend, client)
+    backend, _, sender = _sending_backend(session_enabled=False)
 
-    await backend.send(b'{"n": 1}')
+    await backend.send({"n": 1})
     sent = sender.send_messages.call_args[0][0]
     assert sent.session_id is None
 
 
 async def test_send_sets_application_properties_from_attributes():
-    backend = _make_backend(session_enabled=False)
-    client = MagicMock()
-    sender = _mock_sender()
-    client.get_queue_sender.return_value = sender
-    _patch_client(backend, client)
+    backend, _, sender = _sending_backend(session_enabled=False)
 
-    await backend.send(b"raw", attributes={"content_type": "text/plain"})
+    await backend.send({"raw": True}, attributes={"content_type": "text/plain"})
     sent = sender.send_messages.call_args[0][0]
     assert sent.application_properties == {"content_type": "text/plain"}
 
 
 async def test_send_batch_sets_per_message_dedup_ids():
-    backend = _make_backend(session_enabled=True)
-    client = MagicMock()
     sender = _mock_sender()
     batch = MagicMock()
     sender.create_message_batch = AsyncMock(return_value=batch)
-    client.get_queue_sender.return_value = sender
-    _patch_client(backend, client)
+    backend, _, _ = _sending_backend(session_enabled=True, sender=sender)
 
     ids = await backend.send_batch(
-        [OutgoingMessage(body=b'{"n": 1}'), OutgoingMessage(body=b'{"n": 2}')],
+        [OutgoingMessage(body={"n": 1}), OutgoingMessage(body={"n": 2})],
         group_id="g",
         dedup_ids=["a", "b"],
     )
@@ -132,6 +156,125 @@ async def test_send_batch_sets_per_message_dedup_ids():
     added = [c.args[0] for c in batch.add_message.call_args_list]
     assert [m.message_id for m in added] == ["a", "b"]
     assert all(m.session_id == "g" for m in added)
+    assert [b"".join(m.body) for m in added] == [b'{"n": 1}', b'{"n": 2}']
+
+
+async def test_send_batch_mismatched_dedup_ids():
+    backend, _, _ = _sending_backend(session_enabled=True)
+    with pytest.raises(MessageSendError, match="parallel"):
+        await backend.send_batch(
+            [OutgoingMessage(body={"n": 1})], group_id="g", dedup_ids=["a", "b"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sender caching — one AMQP send link for the life of the backend
+# ---------------------------------------------------------------------------
+
+
+async def test_sender_is_cached_across_sends():
+    sender = _mock_sender()
+    # add_message is sync on the real batch; MagicMock keeps it from returning a coroutine
+    sender.create_message_batch = AsyncMock(return_value=MagicMock())
+    backend, client, _ = _sending_backend(sender=sender)
+
+    await backend.send({"n": 1})
+    await backend.send({"n": 2})
+    await backend.send_batch([OutgoingMessage(body={"n": 3})])
+
+    client.get_queue_sender.assert_called_once_with("test-queue")
+    assert sender.send_messages.await_count == 3
+    # the cached link is never closed between sends
+    sender.close.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ServiceBusConnectionError(message="link detached"),
+        ValueError("The handler has already been shutdown. Please use ServiceBusClient ..."),
+    ],
+    ids=["connection_error", "shutdown_handler"],
+)
+async def test_dead_link_is_rebuilt_and_the_send_retried(error):
+    sender = _mock_sender()
+    sender.send_messages.side_effect = [error, None]
+    backend, client, _ = _sending_backend(sender=sender)
+
+    await backend.send({"n": 1})
+
+    assert client.get_queue_sender.call_count == 2
+    assert sender.send_messages.await_count == 2
+    sender.close.assert_awaited_once()  # the dead link was discarded
+
+
+async def test_dead_link_failing_twice_surfaces_as_cloudrift_error():
+    sender = _mock_sender()
+    sender.send_messages.side_effect = ServiceBusConnectionError(message="still down")
+    backend, client, _ = _sending_backend(sender=sender)
+
+    with pytest.raises(MessageSendError, match="still down"):
+        await backend.send({"n": 1})
+    assert client.get_queue_sender.call_count == 2  # rebuilt once, then gave up
+
+
+async def test_non_link_error_does_not_rebuild_the_sender():
+    sender = _mock_sender()
+    sender.send_messages.side_effect = MessageSizeExceededError(message="too big")
+    backend, client, _ = _sending_backend(sender=sender)
+
+    with pytest.raises(MessageSendError, match="too big"):
+        await backend.send({"n": 1})
+    client.get_queue_sender.assert_called_once()
+    assert sender.send_messages.await_count == 1
+
+
+async def test_close_releases_the_cached_sender():
+    backend, client, sender = _sending_backend()
+    await backend.send({"n": 1})
+    assert backend._sender is sender
+
+    await backend.close()
+
+    sender.close.assert_awaited_once()
+    assert backend._sender is None
+    client.close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Error translation — callers only ever see cloudrift exceptions
+# ---------------------------------------------------------------------------
+
+
+async def test_service_bus_error_translated_to_message_send_error():
+    """ServiceBusError is an AzureError, not an HttpResponseError — it must still translate."""
+    sender = _mock_sender()
+    sender.send_messages.side_effect = ServiceBusError(message="amqp exploded")
+    backend, _, _ = _sending_backend(sender=sender)
+
+    with pytest.raises(MessageSendError, match="amqp exploded"):
+        await backend.send({"n": 1})
+
+
+async def test_entity_not_found_translated_to_queue_not_found():
+    sender = _mock_sender()
+    sender.send_messages.side_effect = MessagingEntityNotFoundError(message="gone")
+    backend, _, _ = _sending_backend(sender=sender)
+
+    with pytest.raises(QueueNotFoundError, match="test-queue"):
+        await backend.send({"n": 1})
+
+
+async def test_batch_overflow_translated_to_message_send_error():
+    """batch.add_message raises MessageSizeExceededError once the batch is full."""
+    sender = _mock_sender()
+    batch = MagicMock()
+    batch.add_message.side_effect = MessageSizeExceededError(message="batch full")
+    sender.create_message_batch = AsyncMock(return_value=batch)
+    backend, _, _ = _sending_backend(sender=sender)
+
+    with pytest.raises(MessageSendError, match="batch full"):
+        await backend.send_batch([OutgoingMessage(body={"n": 1})])
 
 
 async def test_receive_uses_next_available_session():
@@ -198,7 +341,7 @@ async def test_receive_populates_fifo_fields():
     assert m.dedup_id == "d-1"
     assert m.receive_count == 2  # delivery_count + 1
     assert m.body == b'{"n": 1}'
-    assert m.json() == {"n": 1}
+    assert m.data == {"n": 1}
     # application_properties (bytes keys/values) are stringified into attributes.
     assert m.attributes["content_type"] == "text/plain"
 
@@ -285,7 +428,7 @@ async def test_get_queue_depth_uses_admin_client():
 
 
 async def test_session_enabled_threads_through_factories():
-    with patch("azure.identity.aio.ManagedIdentityCredential"):
+    with patch("azure.identity.aio.DefaultAzureCredential"):
         b = AzureServiceBusBackend.from_managed_identity(
             "ns.servicebus.windows.net", "q", session_enabled=True
         )

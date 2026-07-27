@@ -86,6 +86,43 @@ storage = get_storage(
 )
 ```
 
+### Azure authentication
+
+Every Azure backend resolves its identity through the same chain, so one code
+path works in all three environments a service runs in:
+
+```
+Workload Identity  →  Managed Identity  →  Azure CLI
+   (AKS)              (App Service /        (local dev,
+                       Container Apps /      after `az login`)
+                       VM)
+```
+
+That means `get_storage("azure_blob", account_url=...)` with no credentials works
+unchanged on AKS, on App Service, and on your laptop. Pass `client_id=` to select a
+*user-assigned* managed identity; omit it for the system-assigned one.
+
+Developer-machine credential sources are deliberately excluded: ambient
+`AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` env vars (which would silently shadow the
+workload's real identity — the Azure counterpart of SQS's `exclude_env_credentials`),
+plus the shared token cache, VS Code, PowerShell, and `azd`.
+
+To override — for example to lock a production service down to managed identity only:
+
+```python
+storage = get_storage("azure_blob", account_url="...", container="c",
+                      credential_options={"exclude_cli_credential": True})
+```
+
+`credential_options` is accepted by every Azure `from_managed_identity` constructor and
+is forwarded verbatim to `DefaultAzureCredential`. The chain itself is defined once in
+`cloudrift/core/azure_credentials.py`.
+
+> On a developer machine this means code intended to exercise managed identity will
+> instead succeed using your `az login` identity rather than failing. Pass
+> `credential_options={"exclude_cli_credential": True}` when you need to test the
+> production path.
+
 ---
 
 ## Storage
@@ -146,26 +183,22 @@ bus = get_queue("azure_bus", fully_qualified_namespace="ns.servicebus.windows.ne
                 queue_name="my-queue")  # managed identity
 ```
 
-**Operations** — the payload primitive is **raw bytes** plus an optional flat
-`attributes` map (string → string). Attributes map to SQS `MessageAttributes`
+**Operations** — pass a **dict**; cloudrift serializes it to JSON. Optionally add a
+flat `attributes` map (string → string), which maps to SQS `MessageAttributes`
 (String type) / Service Bus `application_properties`:
 
 ```python
-from cloudrift.messaging import OutgoingMessage, send_json
+from cloudrift.messaging import OutgoingMessage
 
-# Raw bytes + attributes
-msg_id = await queue.send(b"raw payload", attributes={"content_type": "text/plain"})
+msg_id = await queue.send({"action": "process", "id": 42}, attributes={"v": "1"})
 ids = await queue.send_batch([
-    OutgoingMessage(body=b"a", attributes={"k": "1"}),
-    OutgoingMessage(body=b"b"),
+    OutgoingMessage(body={"n": 1}, attributes={"k": "1"}),
+    OutgoingMessage(body={"n": 2}),
 ])
-
-# JSON convenience: send_json() dumps+encodes, m.json() loads the bytes body
-await send_json(queue, {"action": "process", "id": 42}, attributes={"v": "1"})
 
 messages = await queue.receive(max_messages=10, wait_time=20)   # long-poll
 for m in messages:
-    handle_job(m.json())         # or m.body for the raw bytes
+    handle_job(m.data)           # the payload dict; m.body is the raw bytes
     print(m.attributes)          # str -> str map
     await queue.delete(m.receipt_handle)   # ack
     # or: await queue.nack(m.receipt_handle)  # return for immediate redelivery
@@ -173,6 +206,14 @@ for m in messages:
 await queue.purge()
 await queue.close()
 ```
+
+`send()` takes a `dict` and nothing else — passing bytes, a string, or a list raises
+`TypeError`. Values `json.dumps` can't encode natively (`datetime`, `Decimal`, `UUID`)
+are stringified via the backend's `json_default`, which defaults to `str`.
+
+`Message.body` stays **raw bytes** on the receive path so a malformed or non-UTF-8
+payload from a foreign producer is still inspectable for dead-letter triage;
+`Message.data` is the decoded dict.
 
 > **Azure Service Bus note:** receipt handles are lock tokens — they are only
 > valid on the same backend instance that received the message, and only within
@@ -188,13 +229,13 @@ queues, pass `group_id` (ordering key) and `dedup_id` (deduplication key):
 # SQS FIFO — group_id is required, dedup_id optional if the queue has
 # content-based deduplication enabled
 fifo = get_queue("sqs", queue_url="https://sqs.../jobs.fifo", region="us-east-1")
-await send_json(fifo, {"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
+await fifo.send({"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
 
 # Azure Service Bus — queue must be created with sessions enabled;
 # pass session_enabled=True so the backend uses session receivers
 bus = get_queue("azure_bus", connection_string="...", queue_name="jobs",
                 session_enabled=True)
-await send_json(bus, {"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
+await bus.send({"task": "extract"}, group_id="owner-123", dedup_id="evt-abc")
 
 messages = await fifo.receive(max_messages=10, wait_time=20, visibility_timeout=300)
 for m in messages:

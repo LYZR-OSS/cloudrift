@@ -174,14 +174,19 @@ class MSSQLSQLBackend(SQLBackend):
         port: int | None = None,
         connection_kwargs: dict | None = None,
         odbc_driver: str = _DEFAULT_ODBC_DRIVER,
+        credential_options: dict | None = None,
     ) -> "MSSQLSQLBackend":
-        """Authenticate via an Azure managed identity (system- or user-assigned)."""
+        """Authenticate via Azure AD: workload identity → managed identity → az CLI.
+
+        ``client_id`` selects a user-assigned managed identity; omit it for the
+        system-assigned one. ``credential_options`` is forwarded to
+        ``DefaultAzureCredential`` — see :mod:`cloudrift.core.azure_credentials`.
+        """
 
         def _provider():
-            from azure.identity import ManagedIdentityCredential
+            from cloudrift.core.azure_credentials import build_credential
 
-            cred = ManagedIdentityCredential(client_id=client_id) if client_id \
-                else ManagedIdentityCredential()
+            cred = build_credential(client_id, **(credential_options or {}))
             return cred.get_token(_AAD_TOKEN_SCOPE).token
 
         return cls(

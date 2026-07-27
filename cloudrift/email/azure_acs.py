@@ -65,15 +65,17 @@ class AzureACSEmailBackend(EmailBackend):
         endpoint: str,
         default_from: str | None = None,
         client_id: str | None = None,
+        credential_options: dict | None = None,
     ) -> "AzureACSEmailBackend":
-        """Authenticate via Azure Managed Identity."""
-        from azure.identity import ManagedIdentityCredential
+        """Authenticate via Azure AD: workload identity → managed identity → az CLI.
 
-        credential = (
-            ManagedIdentityCredential(client_id=client_id)
-            if client_id
-            else ManagedIdentityCredential()
-        )
+        ``client_id`` selects a user-assigned managed identity; omit it for the
+        system-assigned one. ``credential_options`` is forwarded to
+        ``DefaultAzureCredential`` — see :mod:`cloudrift.core.azure_credentials`.
+        """
+        from cloudrift.core.azure_credentials import build_credential
+
+        credential = build_credential(client_id, **(credential_options or {}))
         return cls(endpoint=endpoint, default_from=default_from, credential=credential)
 
     @classmethod

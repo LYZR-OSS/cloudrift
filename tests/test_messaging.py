@@ -5,7 +5,7 @@ import pytest
 from moto.server import ThreadedMotoServer
 
 from cloudrift.core.exceptions import FeatureNotSupportedError, MessageSendError
-from cloudrift.messaging import OutgoingMessage, get_queue, send_json
+from cloudrift.messaging import OutgoingMessage, get_queue
 
 REGION = "us-east-1"
 QUEUE_NAME = "test-queue"
@@ -62,33 +62,47 @@ async def sqs_backend(moto_server, sqs_client):
     sqs_client.delete_queue(QueueUrl=dlq_url)
 
 
-async def test_send_and_receive_bytes(sqs_backend):
-    msg_id = await sqs_backend.send(b"raw payload")
+async def test_send_and_receive_dict(sqs_backend):
+    msg_id = await sqs_backend.send({"raw": "payload"})
     assert isinstance(msg_id, str)
     messages = await sqs_backend.receive(max_messages=1)
     assert len(messages) == 1
-    assert messages[0].body == b"raw payload"
+    assert messages[0].data == {"raw": "payload"}
+    # body stays raw bytes so a malformed payload is still inspectable
     assert isinstance(messages[0].body, bytes)
 
 
 async def test_send_with_attributes_round_trip(sqs_backend):
-    await sqs_backend.send(b"hi", attributes={"content_type": "text/plain", "source": "unit-test"})
+    await sqs_backend.send(
+        {"greeting": "hi"}, attributes={"content_type": "application/json", "source": "unit-test"}
+    )
     [m] = await sqs_backend.receive(max_messages=1)
-    assert m.body == b"hi"
-    assert m.attributes["content_type"] == "text/plain"
+    assert m.data == {"greeting": "hi"}
+    assert m.attributes["content_type"] == "application/json"
     assert m.attributes["source"] == "unit-test"
 
 
-async def test_send_json_and_message_json_helper(sqs_backend):
-    msg_id = await send_json(sqs_backend, {"action": "greet", "name": "cloudrift"})
+async def test_send_dict_and_message_data(sqs_backend):
+    msg_id = await sqs_backend.send({"action": "greet", "name": "cloudrift"})
     assert isinstance(msg_id, str)
     [m] = await sqs_backend.receive(max_messages=1)
-    assert m.json() == {"action": "greet", "name": "cloudrift"}
+    assert m.data == {"action": "greet", "name": "cloudrift"}
+
+
+async def test_send_non_ascii_round_trip(sqs_backend):
+    """The send path is a JSON string, not bytes — non-ASCII must survive intact."""
+    await sqs_backend.send({"n": "café", "emoji": "🚀"})
+    [m] = await sqs_backend.receive(max_messages=1)
+    assert m.data == {"n": "café", "emoji": "🚀"}
 
 
 async def test_send_batch(sqs_backend):
     ids = await sqs_backend.send_batch(
-        [OutgoingMessage(body=b"1"), OutgoingMessage(body=b"2"), OutgoingMessage(body=b"3")]
+        [
+            OutgoingMessage(body={"n": 1}),
+            OutgoingMessage(body={"n": 2}),
+            OutgoingMessage(body={"n": 3}),
+        ]
     )
     assert len(ids) == 3
 
@@ -96,25 +110,25 @@ async def test_send_batch(sqs_backend):
 async def test_send_batch_with_attributes(sqs_backend):
     await sqs_backend.send_batch(
         [
-            OutgoingMessage(body=b"a", attributes={"k": "1"}),
-            OutgoingMessage(body=b"b", attributes={"k": "2"}),
+            OutgoingMessage(body={"v": "a"}, attributes={"k": "1"}),
+            OutgoingMessage(body={"v": "b"}, attributes={"k": "2"}),
         ]
     )
     messages = await sqs_backend.receive(max_messages=10)
-    by_body = {m.body: m.attributes.get("k") for m in messages}
-    assert by_body == {b"a": "1", b"b": "2"}
+    by_body = {m.data["v"]: m.attributes.get("k") for m in messages}
+    assert by_body == {"a": "1", "b": "2"}
 
 
 async def test_delete_message(sqs_backend):
-    await sqs_backend.send(b"x")
+    await sqs_backend.send({"x": 1})
     messages = await sqs_backend.receive(max_messages=1)
     assert messages
     await sqs_backend.delete(messages[0].receipt_handle)
 
 
 async def test_purge(sqs_backend):
-    await sqs_backend.send(b"a")
-    await sqs_backend.send(b"b")
+    await sqs_backend.send({"v": "a"})
+    await sqs_backend.send({"v": "b"})
     await sqs_backend.purge()
     messages = await sqs_backend.receive(max_messages=10)
     assert messages == []
@@ -123,6 +137,135 @@ async def test_purge(sqs_backend):
 def test_invalid_provider():
     with pytest.raises(ValueError, match="Unknown messaging provider"):
         get_queue("rabbitmq", queue_url="x")
+
+
+# ---------------------------------------------------------------------------
+# Serialization contract (cloudrift.messaging.base)
+# ---------------------------------------------------------------------------
+
+
+class _SpyBackend:
+    """Minimal concrete MessagingBackend that records what the ABC hands down."""
+
+    def __init__(self):
+        self.sent = []
+        self.batches = []
+
+    async def _send_json(self, body, attributes, delay, *, group_id, dedup_id):
+        assert isinstance(body, str), f"backend received {type(body).__name__}, not str"
+        self.sent.append(body)
+        return "msg-id"
+
+    async def _send_json_batch(self, items, *, group_id, dedup_ids):
+        self.batches.append(items)
+        return ["msg-id"] * len(items)
+
+    async def receive(self, max_messages=1, wait_time=0, *, group_id=None, visibility_timeout=None):
+        return []
+
+    async def delete(self, receipt_handle):
+        pass
+
+    async def dead_letter(self, receipt_handle, reason):
+        pass
+
+    async def get_queue_depth(self):
+        return 0
+
+    async def purge(self):
+        pass
+
+    async def health_check(self):
+        return True
+
+
+def _spy():
+    from cloudrift.messaging import MessagingBackend
+
+    return type("Spy", (_SpyBackend, MessagingBackend), {})()
+
+
+@pytest.mark.parametrize(
+    "payload,type_name",
+    [(b"raw", "bytes"), ("str", "str"), ([1, 2], "list"), (None, "NoneType"), (42, "int")],
+)
+async def test_send_rejects_non_dict(payload, type_name):
+    with pytest.raises(TypeError, match=f"got {type_name}"):
+        await _spy().send(payload)
+
+
+async def test_send_batch_rejects_non_dict_body():
+    with pytest.raises(TypeError, match="got bytes"):
+        await _spy().send_batch([OutgoingMessage(body=b"raw")])
+
+
+async def test_backend_receives_serialized_json_string():
+    spy = _spy()
+    await spy.send({"action": "process", "id": 42})
+    assert spy.sent == ['{"action": "process", "id": 42}']
+    await spy.send_batch([OutgoingMessage(body={"i": 1}, attributes={"k": "v"})])
+    assert spy.batches == [[('{"i": 1}', {"k": "v"})]]
+
+
+async def test_json_default_stringifies_non_native_values():
+    """json_default (str) keeps datetime/Decimal/UUID payloads from raising."""
+    import uuid
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    spy = _spy()
+    await spy.send(
+        {
+            "when": datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc),
+            "amount": Decimal("10.50"),
+            "id": uuid.UUID("12345678-1234-5678-1234-567812345678"),
+        }
+    )
+    payload = json.loads(spy.sent[0])
+    assert payload["when"] == "2026-07-28 12:00:00+00:00"
+    assert payload["amount"] == "10.50"
+    assert payload["id"] == "12345678-1234-5678-1234-567812345678"
+
+
+def test_message_data_decodes_body():
+    from cloudrift.messaging import Message
+
+    m = Message(id="1", body=b'{"a": 1}', receipt_handle="h")
+    assert m.data == {"a": 1}
+    assert not hasattr(m, "json"), "Message.json() was removed in favour of .data"
+
+
+def test_backend_must_implement_send_json_hooks():
+    """Implementing the old send/send_batch no longer satisfies the ABC."""
+    from cloudrift.messaging import MessagingBackend
+
+    class Legacy(MessagingBackend):
+        async def send(self, *a, **k):
+            return "x"
+
+        async def send_batch(self, *a, **k):
+            return []
+
+        async def receive(self, *a, **k):
+            return []
+
+        async def delete(self, receipt_handle):
+            pass
+
+        async def dead_letter(self, receipt_handle, reason):
+            pass
+
+        async def get_queue_depth(self):
+            return 0
+
+        async def purge(self):
+            pass
+
+        async def health_check(self):
+            return True
+
+    with pytest.raises(TypeError, match="_send_json"):
+        Legacy()
 
 
 # --- New tests for P0 features ---
@@ -136,20 +279,20 @@ async def test_health_check(sqs_backend):
 async def test_standard_queue_zero_delay_omits_delay_seconds(sqs_backend):
     # Regression: DelaySeconds must be omitted when delay == 0 so the same
     # code path works on FIFO queues (which reject the parameter).
-    msg_id = await sqs_backend.send(b"ping")
+    msg_id = await sqs_backend.send({"ping": True})
     assert isinstance(msg_id, str)
 
 
 async def test_group_id_on_standard_queue_raises(sqs_backend):
     with pytest.raises(FeatureNotSupportedError):
-        await sqs_backend.send(b"x", group_id="g1")
+        await sqs_backend.send({"x": 1}, group_id="g1")
 
 
 # --- dead_letter / get_queue_depth ---
 
 
 async def test_dead_letter_moves_message_to_dlq(sqs_backend, sqs_client):
-    await send_json(sqs_backend, {"poison": True, "id": 7})
+    await sqs_backend.send({"poison": True, "id": 7})
     [m] = await sqs_backend.receive(max_messages=1)
 
     await sqs_backend.dead_letter(m.receipt_handle, reason="schema mismatch")
@@ -196,7 +339,7 @@ async def test_dead_letter_without_dlq_raises(moto_server, sqs_client):
         endpoint_url=moto_server,
     )
     try:
-        await backend.send(b"x")
+        await backend.send({"x": 1})
         [m] = await backend.receive(max_messages=1)
         with pytest.raises(MessagingError, match="No dead-letter queue configured"):
             await backend.dead_letter(m.receipt_handle, reason="x")
@@ -219,7 +362,7 @@ async def test_dead_letter_with_explicit_dlq_url(moto_server, sqs_client):
         endpoint_url=moto_server,
     )
     try:
-        await send_json(backend, {"n": 1})
+        await backend.send({"n": 1})
         [m] = await backend.receive(max_messages=1)
         await backend.dead_letter(m.receipt_handle, reason="explicit")
         resp = sqs_client.receive_message(QueueUrl=dlq_url, MaxNumberOfMessages=1)
@@ -231,7 +374,7 @@ async def test_dead_letter_with_explicit_dlq_url(moto_server, sqs_client):
 
 
 async def test_nack_drops_pending_entry(sqs_backend):
-    await sqs_backend.send(b"retry")
+    await sqs_backend.send({"retry": True})
     [m] = await sqs_backend.receive(max_messages=1)
     assert m.receipt_handle in sqs_backend._pending
     await sqs_backend.nack(m.receipt_handle)
@@ -243,8 +386,8 @@ async def test_nack_drops_pending_entry(sqs_backend):
 
 async def test_get_queue_depth(sqs_backend):
     assert await sqs_backend.get_queue_depth() == 0
-    await sqs_backend.send(b"a")
-    await sqs_backend.send(b"b")
+    await sqs_backend.send({"v": "a"})
+    await sqs_backend.send({"v": "b"})
     assert await sqs_backend.get_queue_depth() == 2
     await sqs_backend.purge()
 
@@ -280,20 +423,20 @@ async def fifo_backend(moto_server):
 
 async def test_fifo_send_requires_group_id(fifo_backend):
     with pytest.raises(MessageSendError, match="group_id is required"):
-        await fifo_backend.send(b"x")
+        await fifo_backend.send({"x": 1})
 
 
 async def test_fifo_send_with_delay_raises(fifo_backend):
     with pytest.raises(FeatureNotSupportedError):
-        await fifo_backend.send(b"x", delay=5, group_id="g1")
+        await fifo_backend.send({"x": 1}, delay=5, group_id="g1")
 
 
 async def test_fifo_send_and_receive_exposes_fifo_fields(fifo_backend):
-    await send_json(fifo_backend, {"n": 1}, group_id="owner-1", dedup_id="d-1")
+    await fifo_backend.send({"n": 1}, group_id="owner-1", dedup_id="d-1")
     messages = await fifo_backend.receive(max_messages=1)
     assert len(messages) == 1
     m = messages[0]
-    assert m.json() == {"n": 1}
+    assert m.data == {"n": 1}
     assert m.group_id == "owner-1"
     assert m.dedup_id == "d-1"
     assert m.receive_count == 1
@@ -301,8 +444,8 @@ async def test_fifo_send_and_receive_exposes_fifo_fields(fifo_backend):
 
 
 async def test_fifo_dedup_id_suppresses_duplicate(fifo_backend):
-    await fifo_backend.send(b"1", group_id="g-dedup", dedup_id="same-id")
-    await fifo_backend.send(b"2", group_id="g-dedup", dedup_id="same-id")
+    await fifo_backend.send({"n": 1}, group_id="g-dedup", dedup_id="same-id")
+    await fifo_backend.send({"n": 2}, group_id="g-dedup", dedup_id="same-id")
     messages = await fifo_backend.receive(max_messages=10)
     assert len(messages) == 1
     await fifo_backend.delete(messages[0].receipt_handle)
@@ -310,27 +453,27 @@ async def test_fifo_dedup_id_suppresses_duplicate(fifo_backend):
 
 async def test_fifo_ordering_within_group(fifo_backend):
     for i in range(3):
-        await send_json(fifo_backend, {"seq": i}, group_id="g-order", dedup_id=f"ord-{i}")
+        await fifo_backend.send({"seq": i}, group_id="g-order", dedup_id=f"ord-{i}")
     received = []
     while len(received) < 3:
         messages = await fifo_backend.receive(max_messages=10)
         if not messages:
             break
         for m in messages:
-            received.append(m.json()["seq"])
+            received.append(m.data["seq"])
             await fifo_backend.delete(m.receipt_handle)
     assert received == [0, 1, 2]
 
 
 async def test_fifo_send_batch_with_group_and_dedup_ids(fifo_backend):
     ids = await fifo_backend.send_batch(
-        [OutgoingMessage(body=b"1"), OutgoingMessage(body=b"2")],
+        [OutgoingMessage(body={"n": 1}), OutgoingMessage(body={"n": 2})],
         group_id="g-batch",
         dedup_ids=["b-1", "b-2"],
     )
     assert len(ids) == 2
     messages = await fifo_backend.receive(max_messages=10)
-    assert {m.body for m in messages} == {b"1", b"2"}
+    assert {m.data["n"] for m in messages} == {1, 2}
     for m in messages:
         await fifo_backend.delete(m.receipt_handle)
 
@@ -338,18 +481,18 @@ async def test_fifo_send_batch_with_group_and_dedup_ids(fifo_backend):
 async def test_fifo_send_batch_mismatched_dedup_ids(fifo_backend):
     with pytest.raises(MessageSendError, match="parallel"):
         await fifo_backend.send_batch(
-            [OutgoingMessage(body=b"1")], group_id="g", dedup_ids=["a", "b"]
+            [OutgoingMessage(body={"n": 1})], group_id="g", dedup_ids=["a", "b"]
         )
 
 
 async def test_nack_redelivers_immediately(fifo_backend):
-    await send_json(fifo_backend, {"task": "retry-me"}, group_id="g-nack", dedup_id="nack-1")
+    await fifo_backend.send({"task": "retry-me"}, group_id="g-nack", dedup_id="nack-1")
     first = await fifo_backend.receive(max_messages=1, visibility_timeout=300)
     assert len(first) == 1
     await fifo_backend.nack(first[0].receipt_handle)
     second = await fifo_backend.receive(max_messages=1)
     assert len(second) == 1
-    assert second[0].json() == {"task": "retry-me"}
+    assert second[0].data == {"task": "retry-me"}
     assert second[0].receive_count == 2
     await fifo_backend.delete(second[0].receipt_handle)
 
@@ -381,17 +524,15 @@ async def test_dlq_redrive_flow(moto_server):
     main_q = get_queue("sqs", queue_url=main_url, **creds)
     dlq = get_queue("sqs", queue_url=dlq_url, **creds)
     try:
-        await send_json(
-            dlq, {"owner_id": "u1", "messages": ["hi"]}, group_id="u1", dedup_id="orig-1"
-        )
+        await dlq.send({"owner_id": "u1", "messages": ["hi"]}, group_id="u1", dedup_id="orig-1")
         failed = await dlq.receive(max_messages=10)
         assert len(failed) == 1
         m = failed[0]
-        # Re-send the raw bytes body verbatim to the main queue.
-        await main_q.send(m.body, group_id=m.group_id, dedup_id="redrive-abc-123")
+        # Re-send the decoded payload to the main queue with a fresh dedup ID.
+        await main_q.send(m.data, group_id=m.group_id, dedup_id="redrive-abc-123")
         await dlq.delete(m.receipt_handle)
         redriven = await main_q.receive(max_messages=1)
-        assert redriven[0].json() == {"owner_id": "u1", "messages": ["hi"]}
+        assert redriven[0].data == {"owner_id": "u1", "messages": ["hi"]}
         assert redriven[0].group_id == "u1"
     finally:
         await main_q.close()
@@ -463,15 +604,14 @@ def test_assume_role_omits_external_id_when_absent():
 # exclude_env_credentials (prevent ambient env creds shadowing the task role)
 # ---------------------------------------------------------------------------
 
+
 def _credential_methods(backend):
     resolver = backend._session._session.get_component("credential_provider")
     return [p.METHOD for p in resolver.providers]
 
 
 def test_from_iam_role_keeps_env_provider_by_default():
-    backend = get_queue(
-        "sqs", queue_url="https://sqs.us-east-1.amazonaws.com/123/q", region=REGION
-    )
+    backend = get_queue("sqs", queue_url="https://sqs.us-east-1.amazonaws.com/123/q", region=REGION)
     assert "env" in _credential_methods(backend)
 
 

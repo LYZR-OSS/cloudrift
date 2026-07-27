@@ -64,24 +64,29 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         ssl: bool = True,
         client_id: str | None = None,
         decode_responses: bool = False,
+        credential_options: dict | None = None,
     ) -> "AzureRedisCacheBackend":
-        """Authenticate via Azure Managed Identity (Entra ID token auth).
+        """Authenticate via Azure AD (Entra ID token auth).
 
+        Resolves an identity through workload identity → managed identity → az CLI.
         Requires the cache to have *Microsoft Entra Authentication* enabled and the
-        managed identity to have a Redis data-access role assigned.
+        identity to have a Redis data-access role assigned.
 
         Args:
             host: e.g. ``<name>.redis.cache.windows.net``
-            username: The object ID (or configured Redis username) of the managed identity.
+            username: The object ID (or configured Redis username) of the identity.
             port: Redis SSL port (default 6380).
             db: Database index (default 0).
             ssl: Enable TLS (default ``True``).
             client_id: Optional client ID for a user-assigned managed identity.
                        Omit to use the system-assigned identity.
+            credential_options: Forwarded to ``DefaultAzureCredential`` — see
+                       :mod:`cloudrift.core.azure_credentials`.
         """
         try:
-            from azure.identity import ManagedIdentityCredential
-            credential = ManagedIdentityCredential(client_id=client_id) if client_id else ManagedIdentityCredential()
+            from cloudrift.core.azure_credentials import build_credential
+
+            credential = build_credential(client_id, **(credential_options or {}))
             provider = _AzureEntraCredentialProvider(credential, username)
             client = aioredis.Redis(
                 host=host,

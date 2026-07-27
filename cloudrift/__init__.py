@@ -8,7 +8,7 @@ from cloudrift.crypto import get_crypto
 from cloudrift.pubsub import get_pubsub
 from cloudrift.email import get_email
 
-__version__ = "0.2.6"
+__version__ = "0.2.7"
 __all__ = [
     "get_storage",
     "get_queue",
