@@ -11,7 +11,7 @@ from cloudrift.core.exceptions import (
     MessagingError,
     QueueNotFoundError,
 )
-from cloudrift.messaging.base import Message, MessagingBackend, OutgoingMessage
+from cloudrift.messaging.base import Message, MessagingBackend
 
 
 class AWSSQSBackend(MessagingBackend):
@@ -228,9 +228,9 @@ class AWSSQSBackend(MessagingBackend):
             }
         }
 
-    async def send(
+    async def _send_json(
         self,
-        body: bytes,
+        body: str,
         attributes: dict[str, str] | None = None,
         delay: int = 0,
         *,
@@ -243,28 +243,28 @@ class AWSSQSBackend(MessagingBackend):
         try:
             response = await client.send_message(
                 QueueUrl=self.queue_url,
-                MessageBody=body.decode(),
+                MessageBody=body,
                 **params,
             )
             return response["MessageId"]
         except ClientError as e:
             self._raise(e)
 
-    async def send_batch(
+    async def _send_json_batch(
         self,
-        messages: list[OutgoingMessage],
+        items: list[tuple[str, dict[str, str] | None]],
         *,
         group_id: str | None = None,
         dedup_ids: list[str] | None = None,
     ) -> list[str]:
         client = await self._ensure()
-        if dedup_ids is not None and len(dedup_ids) != len(messages):
+        if dedup_ids is not None and len(dedup_ids) != len(items):
             raise MessageSendError("dedup_ids must be parallel to messages")
         entries = []
-        for i, msg in enumerate(messages):
+        for i, (body, attributes) in enumerate(items):
             params = self._fifo_params(group_id, dedup_ids[i] if dedup_ids else None)
-            params.update(self._message_attributes(msg.attributes))
-            entries.append({"Id": str(i), "MessageBody": msg.body.decode(), **params})
+            params.update(self._message_attributes(attributes))
+            entries.append({"Id": str(i), "MessageBody": body, **params})
         try:
             response = await client.send_message_batch(QueueUrl=self.queue_url, Entries=entries)
             if response.get("Failed"):

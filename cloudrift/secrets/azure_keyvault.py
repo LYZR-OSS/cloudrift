@@ -27,16 +27,19 @@ class AzureKeyVaultBackend(SecretBackend):
         cls,
         vault_url: str,
         client_id: str | None = None,
+        credential_options: dict | None = None,
     ) -> "AzureKeyVaultBackend":
-        """Authenticate via Azure Managed Identity (system or user-assigned)."""
-        from azure.identity.aio import ManagedIdentityCredential
+        """Authenticate via Azure AD: workload identity → managed identity → az CLI.
+
+        ``client_id`` selects a user-assigned managed identity; omit it for the
+        system-assigned one. ``credential_options`` is forwarded to
+        ``DefaultAzureCredential`` — see :mod:`cloudrift.core.azure_credentials`.
+        """
         from azure.keyvault.secrets.aio import SecretClient
 
-        credential = (
-            ManagedIdentityCredential(client_id=client_id)
-            if client_id
-            else ManagedIdentityCredential()
-        )
+        from cloudrift.core.azure_credentials import build_async_credential
+
+        credential = build_async_credential(client_id, **(credential_options or {}))
         return cls(SecretClient(vault_url=vault_url, credential=credential), credential=credential)
 
     @classmethod

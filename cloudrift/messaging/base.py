@@ -3,16 +3,34 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 
+def to_json(payload: dict, *, default=str) -> str:
+    """Serialize ``payload`` to a JSON string.
+
+    The single serialization point for every backend. ``default`` is passed to
+    ``json.dumps`` to stringify values it cannot encode natively (``datetime``,
+    ``Decimal``, ``UUID``, ...).
+
+    Raises:
+        TypeError: if ``payload`` is not a ``dict``.
+    """
+    if not isinstance(payload, dict):
+        raise TypeError(
+            f"send() takes a dict, got {type(payload).__name__}. "
+            "Pass the object directly — cloudrift serializes to JSON."
+        )
+    return json.dumps(payload, default=default)
+
+
 @dataclass
 class OutgoingMessage:
     """A message to send via :meth:`MessagingBackend.send_batch`.
 
-    ``body`` is the raw payload bytes; ``attributes`` is an optional flat map of
-    string metadata that maps to SQS ``MessageAttributes`` (String type) and
-    Service Bus ``application_properties``.
+    ``body`` is the payload dict — cloudrift serializes it to JSON.
+    ``attributes`` is an optional flat map of string metadata that maps to SQS
+    ``MessageAttributes`` (String type) and Service Bus ``application_properties``.
     """
 
-    body: bytes
+    body: dict
     attributes: dict[str, str] | None = None
 
 
@@ -26,12 +44,13 @@ class Message:
     dedup_id: str | None = None
     receive_count: int | None = None
 
-    def json(self):
-        """Decode the raw ``body`` bytes as JSON.
+    @property
+    def data(self) -> dict:
+        """The JSON body decoded to a dict — symmetric with :meth:`MessagingBackend.send`.
 
-        Convenience for the common case where the payload was sent with
-        :func:`send_json`. Raises ``json.JSONDecodeError`` if the body is not
-        valid JSON.
+        ``body`` deliberately stays raw bytes so a malformed or non-UTF-8 payload
+        from a foreign producer is still inspectable for dead-letter triage.
+        Raises ``json.JSONDecodeError`` if the body is not valid JSON.
         """
         return json.loads(self.body)
 
@@ -39,9 +58,18 @@ class Message:
 class MessagingBackend(ABC):
     """Abstract base class for cloud messaging/queue backends.
 
-    The primitive payload is **raw bytes** plus an optional flat ``attributes``
-    map (string → string). JSON users should use the :func:`send_json` helper
-    and :meth:`Message.json` to (de)serialize without touching the byte layer.
+    The payload primitive is a **dict**. :meth:`send` and :meth:`send_batch` are
+    concrete here: they serialize through :func:`to_json` and hand the JSON string
+    to the backend's :meth:`_send_json` / :meth:`_send_json_batch`. A backend never
+    sees an unserialized payload, and a caller cannot send a non-dict. Read the
+    payload back with :attr:`Message.data`.
+
+    Subclass authors: implement ``_send_json``/``_send_json_batch``. Never override
+    ``send``/``send_batch`` — that is what keeps serialization uniform across
+    providers.
+
+    Optional ``attributes`` is a flat map (string → string) that maps to SQS
+    ``MessageAttributes`` (String type) / Service Bus ``application_properties``.
 
     Backends hold long-lived async clients. Use ``await backend.close()`` (or
     ``async with backend:``) to release sockets cleanly.
@@ -52,25 +80,37 @@ class MessagingBackend(ABC):
     when the queue has duplicate detection enabled).
     """
 
-    @abstractmethod
+    json_default = staticmethod(str)
+    """``json.dumps`` fallback for non-JSON-native values. Override per backend if
+    ``Decimal`` fidelity matters."""
+
     async def send(
         self,
-        body: bytes,
+        payload: dict,
         attributes: dict[str, str] | None = None,
         delay: int = 0,
         *,
         group_id: str | None = None,
         dedup_id: str | None = None,
     ) -> str:
-        """Send a raw-bytes message with optional attributes. Returns the message ID.
+        """Serialize ``payload`` to JSON and send it. Returns the message ID.
 
         ``attributes`` map to SQS ``MessageAttributes`` (String type) /
         Service Bus ``application_properties``. group_id/dedup_id apply to FIFO
         (SQS) or session-enabled (Service Bus) queues. SQS FIFO does not support
         per-message ``delay``.
-        """
 
-    @abstractmethod
+        Raises:
+            TypeError: if ``payload`` is not a ``dict``.
+        """
+        return await self._send_json(
+            to_json(payload, default=self.json_default),
+            attributes,
+            delay,
+            group_id=group_id,
+            dedup_id=dedup_id,
+        )
+
     async def send_batch(
         self,
         messages: list[OutgoingMessage],
@@ -82,6 +122,41 @@ class MessagingBackend(ABC):
 
         ``group_id`` applies to every message; ``dedup_ids``, if given, must be
         parallel to ``messages``.
+        """
+        return await self._send_json_batch(
+            [(to_json(m.body, default=self.json_default), m.attributes) for m in messages],
+            group_id=group_id,
+            dedup_ids=dedup_ids,
+        )
+
+    @abstractmethod
+    async def _send_json(
+        self,
+        body: str,
+        attributes: dict[str, str] | None,
+        delay: int,
+        *,
+        group_id: str | None,
+        dedup_id: str | None,
+    ) -> str:
+        """Send one already-serialized JSON ``body``. Returns the message ID.
+
+        Backend extension point for :meth:`send` — it has done the serialization
+        and type checking already.
+        """
+
+    @abstractmethod
+    async def _send_json_batch(
+        self,
+        items: list[tuple[str, dict[str, str] | None]],
+        *,
+        group_id: str | None,
+        dedup_ids: list[str] | None,
+    ) -> list[str]:
+        """Send already-serialized ``(json_body, attributes)`` pairs.
+
+        Backend extension point for :meth:`send_batch`. ``items`` is parallel to
+        the caller's ``messages``, so ``dedup_ids`` indexing still lines up.
         """
 
     @abstractmethod
@@ -95,9 +170,10 @@ class MessagingBackend(ABC):
     ) -> list[Message]:
         """Receive messages. wait_time is long-poll duration in seconds.
 
-        Each :class:`Message` carries the raw ``body`` bytes and an
-        ``attributes`` map (string → string) populated from the provider's
-        message attributes / application properties.
+        Each :class:`Message` carries the raw ``body`` bytes (use
+        :attr:`Message.data` for the decoded dict) and an ``attributes`` map
+        (string → string) populated from the provider's message attributes /
+        application properties.
 
         ``group_id`` receives from a specific session (Service Bus only; SQS
         cannot filter by group). ``visibility_timeout`` overrides the queue's
@@ -151,27 +227,3 @@ class MessagingBackend(ABC):
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
-
-
-async def send_json(
-    backend: MessagingBackend,
-    message: dict,
-    attributes: dict[str, str] | None = None,
-    delay: int = 0,
-    *,
-    group_id: str | None = None,
-    dedup_id: str | None = None,
-) -> str:
-    """Serialize ``message`` to JSON bytes and send it via ``backend``.
-
-    Backend-agnostic convenience wrapper around :meth:`MessagingBackend.send`
-    for the common JSON-payload case. Decode the received body with
-    :meth:`Message.json`.
-    """
-    return await backend.send(
-        json.dumps(message).encode(),
-        attributes,
-        delay,
-        group_id=group_id,
-        dedup_id=dedup_id,
-    )

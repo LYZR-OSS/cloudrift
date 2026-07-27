@@ -2,8 +2,13 @@ import asyncio
 
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from azure.servicebus import NEXT_AVAILABLE_SESSION, ServiceBusMessage
-from azure.servicebus.aio import ServiceBusClient
-from azure.servicebus.exceptions import OperationTimeoutError
+from azure.servicebus.aio import ServiceBusClient, ServiceBusSender
+from azure.servicebus.exceptions import (
+    MessagingEntityNotFoundError,
+    OperationTimeoutError,
+    ServiceBusConnectionError,
+    ServiceBusError,
+)
 
 from cloudrift.core.exceptions import (
     FeatureNotSupportedError,
@@ -11,15 +16,15 @@ from cloudrift.core.exceptions import (
     MessagingError,
     QueueNotFoundError,
 )
-from cloudrift.messaging.base import Message, MessagingBackend, OutgoingMessage
+from cloudrift.messaging.base import Message, MessagingBackend
 
 
 class AzureServiceBusBackend(MessagingBackend):
     """Azure Service Bus messaging backend (native async via ``azure.servicebus.aio``).
 
-    A single ``ServiceBusClient`` (one AMQP connection) is opened lazily and
-    reused for the lifetime of the backend. Call ``await backend.close()``
-    (or use ``async with backend:``) to release the connection.
+    A single ``ServiceBusClient`` (one AMQP connection) and a single send link
+    are opened lazily and reused for the lifetime of the backend. Call
+    ``await backend.close()`` (or use ``async with backend:``) to release them.
 
     Use one of the class methods to construct:
     - ``from_connection_string``  — shared-access connection string
@@ -55,6 +60,9 @@ class AzureServiceBusBackend(MessagingBackend):
         self._namespace = fully_qualified_namespace
         self._credential = credential
         self._client: ServiceBusClient | None = None
+        # One long-lived AMQP send link, reused across sends. Opening a sender
+        # per message costs a full link handshake + teardown on every send.
+        self._sender: ServiceBusSender | None = None
         self._lock = asyncio.Lock()
         # lock_token → (receiver, ServiceBusReceivedMessage)
         self._pending: dict[str, tuple] = {}
@@ -84,15 +92,17 @@ class AzureServiceBusBackend(MessagingBackend):
         client_id: str | None = None,
         *,
         session_enabled: bool = False,
+        credential_options: dict | None = None,
     ) -> "AzureServiceBusBackend":
-        """Authenticate via Azure Managed Identity (system or user-assigned)."""
-        from azure.identity.aio import ManagedIdentityCredential
+        """Authenticate via Azure AD: workload identity → managed identity → az CLI.
 
-        credential = (
-            ManagedIdentityCredential(client_id=client_id)
-            if client_id
-            else ManagedIdentityCredential()
-        )
+        ``client_id`` selects a user-assigned managed identity; omit it for the
+        system-assigned one. ``credential_options`` is forwarded to
+        ``DefaultAzureCredential`` — see :mod:`cloudrift.core.azure_credentials`.
+        """
+        from cloudrift.core.azure_credentials import build_async_credential
+
+        credential = build_async_credential(client_id, **(credential_options or {}))
         return cls(
             queue_name,
             fully_qualified_namespace=fully_qualified_namespace,
@@ -139,6 +149,31 @@ class AzureServiceBusBackend(MessagingBackend):
                     self._client = ServiceBusClient(self._namespace, credential=self._credential)
         return self._client
 
+    async def _ensure_sender(self) -> ServiceBusSender:
+        """Return the cached send link, creating it on first use.
+
+        The sender is deliberately *not* used as an async context manager —
+        ``__aexit__`` closes it, which is exactly the per-message teardown this
+        cache exists to avoid. The SDK reopens the underlying AMQP link itself on
+        retryable errors, so a long-lived sender survives transient drops.
+        """
+        if self._sender is not None:
+            return self._sender
+        client = await self._ensure()
+        async with self._lock:
+            if self._sender is None:
+                self._sender = client.get_queue_sender(self.queue_name)
+        return self._sender
+
+    async def _discard_sender(self) -> None:
+        """Drop the cached sender so the next send builds a fresh link."""
+        sender, self._sender = self._sender, None
+        if sender is not None:
+            try:
+                await sender.close()
+            except Exception:
+                pass
+
     async def close(self) -> None:
         for receiver, _ in list(self._receiver_tokens.values()):
             try:
@@ -147,6 +182,7 @@ class AzureServiceBusBackend(MessagingBackend):
                 pass
         self._receiver_tokens.clear()
         self._pending.clear()
+        await self._discard_sender()
         if self._client is not None:
             await self._client.close()
             self._client = None
@@ -159,7 +195,7 @@ class AzureServiceBusBackend(MessagingBackend):
 
     def _build_message(
         self,
-        body: bytes,
+        body: str,
         attributes: dict[str, str] | None,
         group_id: str | None,
         dedup_id: str | None,
@@ -177,57 +213,90 @@ class AzureServiceBusBackend(MessagingBackend):
             sb_message.message_id = dedup_id
         return sb_message
 
-    async def send(
+    @staticmethod
+    def _is_dead_link(exc: Exception) -> bool:
+        """True if ``exc`` means the cached send link is unusable and must be rebuilt.
+
+        ``ServiceBusConnectionError`` is the link/connection failure. A bare
+        ``ValueError`` naming a shut-down handler comes from the SDK's
+        ``_check_live()`` when the sender was already closed — the one state the
+        SDK's internal retry cannot recover from.
+        """
+        if isinstance(exc, ServiceBusConnectionError):
+            return True
+        return isinstance(exc, ValueError) and "shutdown" in str(exc).lower()
+
+    async def _send_with_sender(self, operation):
+        """Run ``operation(sender)`` on the cached link, rebuilding it once if it is dead."""
+        sender = await self._ensure_sender()
+        try:
+            return await operation(sender)
+        except Exception as e:
+            if not self._is_dead_link(e):
+                raise
+            await self._discard_sender()
+            sender = await self._ensure_sender()
+            return await operation(sender)
+
+    def _raise_send_error(self, exc: Exception):
+        # MessagingEntityNotFoundError subclasses ServiceBusError, so it must be
+        # matched first. ServiceBusError is an AzureError, *not* an
+        # HttpResponseError — catching only the latter lets AMQP errors escape.
+        if isinstance(exc, (MessagingEntityNotFoundError, ResourceNotFoundError)):
+            raise QueueNotFoundError(f"Queue not found: {self.queue_name}") from exc
+        raise MessageSendError(str(exc)) from exc
+
+    async def _send_json(
         self,
-        body: bytes,
+        body: str,
         attributes: dict[str, str] | None = None,
         delay: int = 0,
         *,
         group_id: str | None = None,
         dedup_id: str | None = None,
     ) -> str:
-        client = await self._ensure()
         sb_message = self._build_message(body, attributes, group_id, dedup_id)
+        if delay:
+            from datetime import datetime, timedelta, timezone
+
+            sb_message.scheduled_enqueue_time_utc = datetime.now(timezone.utc) + timedelta(
+                seconds=delay
+            )
+
+        async def _op(sender):
+            await sender.send_messages(sb_message)
+            return sb_message.message_id or ""
+
         try:
-            async with client.get_queue_sender(self.queue_name) as sender:
-                if delay:
-                    from datetime import datetime, timedelta, timezone
+            return await self._send_with_sender(_op)
+        except (ServiceBusError, HttpResponseError) as e:
+            self._raise_send_error(e)
 
-                    sb_message.scheduled_enqueue_time_utc = datetime.now(timezone.utc) + timedelta(
-                        seconds=delay
-                    )
-                await sender.send_messages(sb_message)
-                return sb_message.message_id or ""
-        except ResourceNotFoundError as e:
-            raise QueueNotFoundError(f"Queue not found: {self.queue_name}") from e
-        except HttpResponseError as e:
-            raise MessageSendError(str(e)) from e
-
-    async def send_batch(
+    async def _send_json_batch(
         self,
-        messages: list[OutgoingMessage],
+        items: list[tuple[str, dict[str, str] | None]],
         *,
         group_id: str | None = None,
         dedup_ids: list[str] | None = None,
     ) -> list[str]:
-        client = await self._ensure()
-        if dedup_ids is not None and len(dedup_ids) != len(messages):
+        if dedup_ids is not None and len(dedup_ids) != len(items):
             raise MessageSendError("dedup_ids must be parallel to messages")
         sb_messages = [
-            self._build_message(m.body, m.attributes, group_id, dedup_ids[i] if dedup_ids else None)
-            for i, m in enumerate(messages)
+            self._build_message(body, attributes, group_id, dedup_ids[i] if dedup_ids else None)
+            for i, (body, attributes) in enumerate(items)
         ]
+
+        async def _op(sender):
+            batch = await sender.create_message_batch()
+            for msg in sb_messages:
+                batch.add_message(msg)
+            await sender.send_messages(batch)
+            return [msg.message_id or "" for msg in sb_messages]
+
         try:
-            async with client.get_queue_sender(self.queue_name) as sender:
-                batch = await sender.create_message_batch()
-                for msg in sb_messages:
-                    batch.add_message(msg)
-                await sender.send_messages(batch)
-                return [msg.message_id or "" for msg in sb_messages]
-        except ResourceNotFoundError as e:
-            raise QueueNotFoundError(f"Queue not found: {self.queue_name}") from e
-        except HttpResponseError as e:
-            raise MessageSendError(str(e)) from e
+            return await self._send_with_sender(_op)
+        except (ServiceBusError, HttpResponseError) as e:
+            self._raise_send_error(e)
 
     async def receive(
         self,

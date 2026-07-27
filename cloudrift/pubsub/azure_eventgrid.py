@@ -44,16 +44,19 @@ class AzureEventGridBackend(PubSubBackend):
         cls,
         endpoint: str,
         client_id: str | None = None,
+        credential_options: dict | None = None,
     ) -> "AzureEventGridBackend":
-        """Authenticate via Azure Managed Identity."""
-        from azure.identity.aio import ManagedIdentityCredential
+        """Authenticate via Azure AD: workload identity → managed identity → az CLI.
+
+        ``client_id`` selects a user-assigned managed identity; omit it for the
+        system-assigned one. ``credential_options`` is forwarded to
+        ``DefaultAzureCredential`` — see :mod:`cloudrift.core.azure_credentials`.
+        """
         from azure.eventgrid.aio import EventGridPublisherClient
 
-        credential = (
-            ManagedIdentityCredential(client_id=client_id)
-            if client_id
-            else ManagedIdentityCredential()
-        )
+        from cloudrift.core.azure_credentials import build_async_credential
+
+        credential = build_async_credential(client_id, **(credential_options or {}))
         return cls(
             EventGridPublisherClient(endpoint, credential), credential=credential
         )

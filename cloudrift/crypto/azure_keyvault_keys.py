@@ -4,11 +4,7 @@ from azure.core.exceptions import (
     ClientAuthenticationError,
     ResourceNotFoundError,
 )
-from azure.identity.aio import (
-    ClientSecretCredential,
-    DefaultAzureCredential,
-    ManagedIdentityCredential,
-)
+from azure.identity.aio import ClientSecretCredential
 from azure.keyvault.keys.crypto import EncryptionAlgorithm
 from azure.keyvault.keys.crypto.aio import CryptographyClient
 
@@ -34,8 +30,7 @@ class AzureKeyVaultKeysBackend(CryptoBackend):
 
     Construct via:
     - ``from_service_principal`` — tenant_id / client_id / client_secret
-    - ``from_managed_identity``  — managed identity (optionally a client_id),
-      else DefaultAzureCredential
+    - ``from_managed_identity``  — workload identity → managed identity → az CLI
     """
 
     def __init__(
@@ -77,14 +72,20 @@ class AzureKeyVaultKeysBackend(CryptoBackend):
         cls,
         key_id: str,
         client_id: str | None = None,
+        credential_options: dict | None = None,
         **kwargs,
     ) -> "AzureKeyVaultKeysBackend":
-        """Authenticate via managed identity (or DefaultAzureCredential)."""
-        credential = (
-            ManagedIdentityCredential(client_id=client_id)
-            if client_id
-            else DefaultAzureCredential()
-        )
+        """Authenticate via Azure AD: workload identity → managed identity → az CLI.
+
+        ``client_id`` selects a user-assigned managed identity; omit it for the
+        system-assigned one. ``credential_options`` is forwarded to
+        ``DefaultAzureCredential`` — see :mod:`cloudrift.core.azure_credentials`.
+        (A dict rather than ``**kwargs`` here because ``**kwargs`` already
+        carries backend options such as ``algorithm``.)
+        """
+        from cloudrift.core.azure_credentials import build_async_credential
+
+        credential = build_async_credential(client_id, **(credential_options or {}))
         return cls(key_id, credential, **kwargs)
 
     # ------------------------------------------------------------------

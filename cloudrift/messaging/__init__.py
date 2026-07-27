@@ -2,7 +2,7 @@ from cloudrift.messaging.base import (
     Message,
     MessagingBackend,
     OutgoingMessage,
-    send_json,
+    to_json,
 )
 
 
@@ -54,5 +54,5 @@ __all__ = [
     "MessagingBackend",
     "OutgoingMessage",
     "get_queue",
-    "send_json",
+    "to_json",
 ]
