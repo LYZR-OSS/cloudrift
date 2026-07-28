@@ -59,6 +59,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         username: str | None = None,
         db: int = 0,
         ssl: bool = False,
+        ssl_cert_reqs: str = "required",
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
         **client_kwargs,
@@ -71,7 +72,15 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
             password: Optional AUTH password.
             username: Optional ACL username (Redis 6+).
             db: Database index (default 0).
-            ssl: Enable TLS (default ``False``).
+            ssl: Enable TLS (default ``False``). Required by managed Redis that
+                only exposes a TLS port — e.g. Azure Managed Redis on 10000 or
+                Azure Cache for Redis on 6380. Connecting in plaintext to a
+                TLS-only port gets the connection closed by the server, which
+                surfaces as ``ConnectionError: Connection closed by server.``
+            ssl_cert_reqs: Server-certificate policy: ``"required"`` (default),
+                ``"optional"``, or ``"none"``. Ignored unless ``ssl`` is true.
+                Do not pass ``None`` — redis-py resolves that to ``CERT_NONE``,
+                silently disabling verification.
             ssl_ca_certs: Optional path to the CA certificate bundle (PEM).
             decode_responses: When ``True``, read operations return ``str`` instead
                 of ``bytes`` (mirrors redis-py's ``decode_responses``).
@@ -86,6 +95,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
                 username=username,
                 db=db,
                 ssl=ssl,
+                ssl_cert_reqs=ssl_cert_reqs,
                 ssl_ca_certs=ssl_ca_certs,
                 **resilient_client_kwargs(
                     decode_responses=decode_responses, **client_kwargs
