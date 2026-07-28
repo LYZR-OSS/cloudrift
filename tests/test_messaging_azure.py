@@ -58,8 +58,10 @@ def _sending_backend(session_enabled=False, sender=None):
 class _FakeReceivedMessage:
     """Minimal stand-in for ServiceBusReceivedMessage.
 
-    The real type exposes its raw payload via ``bytes(message)``; emulate that
-    deterministically (MagicMock does not reliably support ``__bytes__``).
+    Mirrors the real type's payload access: ``.body`` yields the raw bytes in
+    chunks and is single-use, while ``bytes(message)`` raises TypeError. An
+    earlier version of this fake implemented ``__bytes__``, which let a
+    ``bytes(m)`` conversion pass here and fail against a live broker.
     """
 
     def __init__(
@@ -73,9 +75,15 @@ class _FakeReceivedMessage:
         self.enqueued_time_utc = "2026-01-01"
         self.application_properties = application_properties
         self._body = body
+        self._body_consumed = False
 
-    def __bytes__(self):
-        return self._body
+    @property
+    def body(self):
+        if self._body_consumed:
+            raise RuntimeError("ServiceBusReceivedMessage.body is single-use")
+        self._body_consumed = True
+        # The real SDK yields the payload in chunks.
+        return iter([self._body[:1], self._body[1:]] if self._body else [])
 
 
 def _make_received_message(
