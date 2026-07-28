@@ -1,7 +1,14 @@
+import inspect
+
 import pytest
 import fakeredis.aioredis
 
-from cloudrift.cache import get_cache
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
+from cloudrift.cache import get_cache, resilient_client_kwargs
+from cloudrift.cache.redis_azure import AzureRedisCacheBackend
+from cloudrift.cache.redis_elasticache import AWSElastiCacheBackend
 from cloudrift.cache.redis_standalone import StandaloneRedisBackend
 
 
@@ -246,3 +253,100 @@ async def test_flush(cache):
 def test_invalid_provider():
     with pytest.raises(ValueError, match="Unknown cache provider"):
         get_cache("gcp_memorystore", "from_url", url="redis://localhost")
+
+
+# ---------------------------------------------------------------------------
+# Connection resilience
+# ---------------------------------------------------------------------------
+#
+# redis-py defaults to health_check_interval=0 and Retry(NoBackoff(), 0), so a
+# managed Redis that reaps idle connections or fails over surfaces
+# "Connection closed by server." to the caller. Every factory must opt out of
+# those defaults.
+#
+# _FACTORIES covers the auth methods constructible without cloud credentials.
+# test_every_factory_accepts_client_kwargs covers the rest by signature, so a
+# newly added factory cannot silently skip the resilience settings.
+
+_FACTORIES = [
+    ("redis", "from_url", {"url": "redis://localhost:6379/0"}),
+    ("redis", "from_credentials", {"host": "localhost"}),
+    ("redis", "from_tls_cert", {"host": "localhost"}),
+    ("elasticache", "from_auth_token", {"host": "ec.example.com", "auth_token": "t"}),
+    ("elasticache", "from_tls_cert", {"host": "ec.example.com"}),
+    ("azure_redis", "from_access_key", {"host": "az.example.com", "access_key": "k"}),
+]
+
+
+@pytest.mark.parametrize("provider,auth_method,kwargs", _FACTORIES)
+def test_factory_sets_connection_resilience(provider, auth_method, kwargs):
+    backend = get_cache(provider, auth_method, **kwargs)
+    pool = backend._client.connection_pool
+    ckw = pool.connection_kwargs
+
+    assert ckw["health_check_interval"] == 30
+    assert ckw["socket_keepalive"] is True
+    assert ckw["socket_timeout"] == 5.0
+    assert ckw["socket_connect_timeout"] == 5.0
+    assert pool.max_connections == 100
+
+    # A retry policy with real attempts, covering connection loss and timeouts.
+    assert ckw["retry"].get_retries() == 3
+    assert RedisConnectionError in ckw["retry_on_error"]
+    assert RedisTimeoutError in ckw["retry_on_error"]
+
+
+@pytest.mark.parametrize("provider,auth_method,kwargs", _FACTORIES)
+def test_factory_resilience_is_overridable(provider, auth_method, kwargs):
+    backend = get_cache(
+        provider, auth_method, health_check_interval=7, max_connections=5, **kwargs
+    )
+    pool = backend._client.connection_pool
+    assert pool.connection_kwargs["health_check_interval"] == 7
+    assert pool.max_connections == 5
+
+
+def test_resilient_client_kwargs_defaults_and_overrides():
+    defaults = resilient_client_kwargs()
+    assert defaults["health_check_interval"] == 30
+    assert defaults["max_connections"] == 100
+
+    overridden = resilient_client_kwargs(socket_timeout=0.5, decode_responses=True)
+    assert overridden["socket_timeout"] == 0.5
+    assert overridden["decode_responses"] is True
+    # Untouched defaults survive an override.
+    assert overridden["health_check_interval"] == 30
+
+
+def test_connection_built_from_pool_carries_resilience():
+    """The settings must reach the Connection object, not just the kwargs dict."""
+    backend = get_cache("redis", "from_credentials", host="localhost")
+    conn = backend._client.connection_pool.make_connection()
+    assert conn.health_check_interval == 30
+    assert conn.retry.get_retries() == 3
+
+
+@pytest.mark.parametrize(
+    "backend_cls",
+    [StandaloneRedisBackend, AWSElastiCacheBackend, AzureRedisCacheBackend],
+)
+def test_every_factory_accepts_client_kwargs(backend_cls):
+    """Guards the factories that need cloud credentials to actually construct.
+
+    A factory without **client_kwargs cannot be forwarding the resilience
+    defaults, so this catches a new auth method that forgets them.
+    """
+    factories = [
+        name
+        for name in dir(backend_cls)
+        if name.startswith("from_")
+        and isinstance(inspect.getattr_static(backend_cls, name), classmethod)
+    ]
+    assert factories, f"no factories found on {backend_cls.__name__}"
+
+    for name in factories:
+        params = inspect.signature(getattr(backend_cls, name)).parameters.values()
+        assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params), (
+            f"{backend_cls.__name__}.{name} does not accept **client_kwargs, so it "
+            "cannot forward the connection-resilience defaults"
+        )

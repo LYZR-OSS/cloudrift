@@ -2,9 +2,53 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from cloudrift.core.exceptions import CacheError
+
+# Defaults for every Redis-backed cache client.
+#
+# redis-py ships with `health_check_interval=0` and `Retry(NoBackoff(), 0)` —
+# i.e. no health checks and no retries. Managed Redis (Azure Cache for Redis,
+# ElastiCache) reaps idle connections and drops every connection during
+# maintenance, failover, and scale operations, so those defaults surface
+# `ConnectionError: Connection closed by server.` to the caller on the first
+# command after the server hangs up. These values make a pooled client ride
+# through a sub-second disruption instead. Override per call site by passing the
+# same keyword to any factory.
+DEFAULT_HEALTH_CHECK_INTERVAL = 30
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_SOCKET_TIMEOUT = 5.0
+DEFAULT_SOCKET_CONNECT_TIMEOUT = 5.0
+DEFAULT_MAX_CONNECTIONS = 100
+
+
+def resilient_client_kwargs(**overrides) -> dict:
+    """Return `aioredis.Redis` kwargs that survive managed-Redis disruptions.
+
+    Backoff is 0.1s, 0.2s, 0.4s — roughly 0.7s of retry budget per command,
+    enough for a fast failover without stalling a request behind a hard outage.
+    `Retry` is deep-copied per connection by redis-py, so sharing one instance
+    across a pool is safe.
+
+    The cache API exposes no blocking commands, so a socket read timeout cannot
+    cut short a legitimately long call.
+    """
+    kwargs = {
+        "retry": Retry(ExponentialBackoff(cap=1.0, base=0.1), DEFAULT_MAX_RETRIES),
+        "retry_on_error": [RedisConnectionError, RedisTimeoutError],
+        "health_check_interval": DEFAULT_HEALTH_CHECK_INTERVAL,
+        "socket_keepalive": True,
+        "socket_timeout": DEFAULT_SOCKET_TIMEOUT,
+        "socket_connect_timeout": DEFAULT_SOCKET_CONNECT_TIMEOUT,
+        "max_connections": DEFAULT_MAX_CONNECTIONS,
+    }
+    kwargs.update(overrides)
+    return kwargs
 
 
 class CacheBackend(ABC):

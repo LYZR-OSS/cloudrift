@@ -1,6 +1,6 @@
 import redis.asyncio as aioredis
 
-from cloudrift.cache.base import CacheBackend, _RedisMixin
+from cloudrift.cache.base import CacheBackend, _RedisMixin, resilient_client_kwargs
 from cloudrift.core.exceptions import CacheConnectionError
 
 
@@ -26,6 +26,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         url: str,
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        **client_kwargs,
     ) -> "StandaloneRedisBackend":
         """Connect using a Redis URL.
 
@@ -36,9 +37,13 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
             decode_responses: When ``True``, read operations return ``str`` instead
                 of ``bytes`` (mirrors redis-py's ``decode_responses``). Default
                 ``False`` keeps the cache-backend contract of returning ``bytes``.
+            **client_kwargs: Overrides for the connection-resilience defaults
+                documented on ``resilient_client_kwargs``.
         """
         try:
-            kwargs: dict = {"decode_responses": decode_responses}
+            kwargs = resilient_client_kwargs(
+                decode_responses=decode_responses, **client_kwargs
+            )
             if ssl_ca_certs:
                 kwargs["ssl_ca_certs"] = ssl_ca_certs
             return cls(aioredis.from_url(url, **kwargs))
@@ -56,6 +61,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         ssl: bool = False,
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        **client_kwargs,
     ) -> "StandaloneRedisBackend":
         """Connect using explicit host, port, and optional credentials.
 
@@ -69,6 +75,8 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
             ssl_ca_certs: Optional path to the CA certificate bundle (PEM).
             decode_responses: When ``True``, read operations return ``str`` instead
                 of ``bytes`` (mirrors redis-py's ``decode_responses``).
+            **client_kwargs: Overrides for the connection-resilience defaults
+                documented on ``resilient_client_kwargs``.
         """
         try:
             client = aioredis.Redis(
@@ -79,7 +87,9 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
                 db=db,
                 ssl=ssl,
                 ssl_ca_certs=ssl_ca_certs,
-                decode_responses=decode_responses,
+                **resilient_client_kwargs(
+                    decode_responses=decode_responses, **client_kwargs
+                ),
             )
             return cls(client)
         except Exception as e:
@@ -97,6 +107,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         ssl_keyfile: str | None = None,
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        **client_kwargs,
     ) -> "StandaloneRedisBackend":
         """Connect using mutual TLS (mTLS) with client certificate and key files.
 
@@ -111,6 +122,8 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
             ssl_ca_certs: Path to the CA certificate bundle (PEM) for server verification.
             decode_responses: When ``True``, read operations return ``str`` instead
                 of ``bytes`` (mirrors redis-py's ``decode_responses``).
+            **client_kwargs: Overrides for the connection-resilience defaults
+                documented on ``resilient_client_kwargs``.
         """
         try:
             client = aioredis.Redis(
@@ -123,7 +136,9 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
                 ssl_certfile=ssl_certfile,
                 ssl_keyfile=ssl_keyfile,
                 ssl_ca_certs=ssl_ca_certs,
-                decode_responses=decode_responses,
+                **resilient_client_kwargs(
+                    decode_responses=decode_responses, **client_kwargs
+                ),
             )
             return cls(client)
         except Exception as e:
