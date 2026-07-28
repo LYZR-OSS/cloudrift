@@ -5,7 +5,7 @@ import redis.asyncio as aioredis
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
-from redis.exceptions import RedisError
+from redis.exceptions import ReadOnlyError, RedisError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from cloudrift.core.exceptions import CacheError
@@ -20,6 +20,13 @@ from cloudrift.core.exceptions import CacheError
 # command after the server hangs up. These values make a pooled client ride
 # through a sub-second disruption instead. Override per call site by passing the
 # same keyword to any factory.
+#
+# `ReadOnlyError` is in the retry set for Azure Cache for Redis specifically:
+# failover promotes the replica, and a pooled connection can still be pointed at
+# the node that just became read-only, which answers writes with `-READONLY`.
+# redis-py raises that as a `ResponseError` subclass, not a `ConnectionError`,
+# so it is only retried if listed. Retrying disconnects and reconnects, which
+# re-resolves DNS to the newly promoted primary.
 DEFAULT_HEALTH_CHECK_INTERVAL = 30
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_SOCKET_TIMEOUT = 5.0
@@ -40,7 +47,7 @@ def resilient_client_kwargs(**overrides) -> dict:
     """
     kwargs = {
         "retry": Retry(ExponentialBackoff(cap=1.0, base=0.1), DEFAULT_MAX_RETRIES),
-        "retry_on_error": [RedisConnectionError, RedisTimeoutError],
+        "retry_on_error": [RedisConnectionError, RedisTimeoutError, ReadOnlyError],
         "health_check_interval": DEFAULT_HEALTH_CHECK_INTERVAL,
         "socket_keepalive": True,
         "socket_timeout": DEFAULT_SOCKET_TIMEOUT,

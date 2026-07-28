@@ -4,6 +4,7 @@ import pytest
 import fakeredis.aioredis
 
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import ReadOnlyError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from cloudrift.cache import get_cache, resilient_client_kwargs
@@ -294,6 +295,10 @@ def test_factory_sets_connection_resilience(provider, auth_method, kwargs):
     assert ckw["retry"].get_retries() == 3
     assert RedisConnectionError in ckw["retry_on_error"]
     assert RedisTimeoutError in ckw["retry_on_error"]
+    # Azure failover answers writes with -READONLY from the demoted primary.
+    # It is a ResponseError, not a ConnectionError, so it must be listed
+    # explicitly or the caller sees the error instead of a reconnect.
+    assert ReadOnlyError in ckw["retry_on_error"]
 
 
 @pytest.mark.parametrize("provider,auth_method,kwargs", _FACTORIES)
