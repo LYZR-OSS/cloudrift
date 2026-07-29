@@ -1,7 +1,7 @@
 import redis.asyncio as aioredis
 from redis.credentials import CredentialProvider
 
-from cloudrift.cache.base import CacheBackend, _RedisMixin
+from cloudrift.cache.base import CacheBackend, _RedisMixin, resilient_client_kwargs
 from cloudrift.core.exceptions import CacheConnectionError
 
 
@@ -31,6 +31,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
         ssl: bool = True,
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        **client_kwargs,
     ) -> "AWSElastiCacheBackend":
         """Connect using an ElastiCache AUTH token (shared secret).
 
@@ -45,6 +46,8 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
             ssl: Enable TLS in-transit encryption (default ``True``).
             ssl_ca_certs: Optional path to the CA bundle (PEM) for server verification.
             decode_responses: When ``True``, reads return ``str`` instead of ``bytes``.
+            **client_kwargs: Overrides for the connection-resilience defaults
+                documented on ``resilient_client_kwargs``.
         """
         try:
             client = aioredis.Redis(
@@ -54,7 +57,9 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
                 db=db,
                 ssl=ssl,
                 ssl_ca_certs=ssl_ca_certs,
-                decode_responses=decode_responses,
+                **resilient_client_kwargs(
+                    decode_responses=decode_responses, **client_kwargs
+                ),
             )
             return cls(client)
         except Exception as e:
@@ -75,6 +80,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
         aws_session_token: str | None = None,
         profile_name: str | None = None,
         decode_responses: bool = False,
+        **client_kwargs,
     ) -> "AWSElastiCacheBackend":
         """Connect using IAM-based authentication (ElastiCache Redis 7+ with IAM enabled).
 
@@ -93,6 +99,8 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
             aws_secret_access_key: Optional explicit AWS secret key.
             aws_session_token: Optional STS session token.
             profile_name: Optional named AWS credentials profile.
+            **client_kwargs: Overrides for the connection-resilience defaults
+                documented on ``resilient_client_kwargs``.
         """
         try:
             provider = _ElastiCacheIAMProvider(
@@ -112,7 +120,9 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
                 ssl=ssl,
                 ssl_ca_certs=ssl_ca_certs,
                 credential_provider=provider,
-                decode_responses=decode_responses,
+                **resilient_client_kwargs(
+                    decode_responses=decode_responses, **client_kwargs
+                ),
             )
             return cls(client)
         except Exception as e:
@@ -129,6 +139,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
         ssl_keyfile: str | None = None,
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        **client_kwargs,
     ) -> "AWSElastiCacheBackend":
         """Connect using mutual TLS (mTLS) with a client certificate and key.
 
@@ -141,6 +152,8 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
             ssl_keyfile: Path to the client private key PEM file.
             ssl_ca_certs: Path to the CA certificate bundle (PEM) for server verification.
             decode_responses: When ``True``, reads return ``str`` instead of ``bytes``.
+            **client_kwargs: Overrides for the connection-resilience defaults
+                documented on ``resilient_client_kwargs``.
         """
         try:
             client = aioredis.Redis(
@@ -152,7 +165,9 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
                 ssl_certfile=ssl_certfile,
                 ssl_keyfile=ssl_keyfile,
                 ssl_ca_certs=ssl_ca_certs,
-                decode_responses=decode_responses,
+                **resilient_client_kwargs(
+                    decode_responses=decode_responses, **client_kwargs
+                ),
             )
             return cls(client)
         except Exception as e:

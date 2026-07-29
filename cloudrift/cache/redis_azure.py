@@ -1,7 +1,7 @@
 import redis.asyncio as aioredis
 from redis.credentials import CredentialProvider
 
-from cloudrift.cache.base import CacheBackend, _RedisMixin
+from cloudrift.cache.base import CacheBackend, _RedisMixin, resilient_client_kwargs
 from cloudrift.core.exceptions import CacheConnectionError
 
 
@@ -29,30 +29,56 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         port: int = 6380,
         db: int = 0,
         ssl: bool = True,
+        username: str | None = None,
+        ssl_cert_reqs: str = "required",
         decode_responses: bool = False,
+        **client_kwargs,
     ) -> "AzureRedisCacheBackend":
-        """Authenticate with an Azure Cache for Redis access key.
+        """Authenticate with an Azure Redis access key.
+
+        Covers both Azure Redis products, which differ in host, port and auth:
+
+        - **Azure Cache for Redis** — ``<name>.redis.cache.windows.net`` on 6380,
+          password-only. The defaults here target it.
+        - **Azure Managed Redis** — ``<name>.<region>.redis.azure.net`` on
+          **10000**, ACL-based, so it also needs ``username`` (usually
+          ``"default"``).
+
+        Both are TLS-only. Connecting in plaintext gets the connection closed by
+        the server, surfacing as ``ConnectionError: Connection closed by server.``
 
         Args:
-            host: e.g. ``<name>.redis.cache.windows.net``
+            host: Cache hostname.
             access_key: Primary or secondary access key from the Azure portal.
-            port: Redis SSL port (default 6380; non-TLS is 6379).
+            port: TLS port — 6380 for Azure Cache for Redis, 10000 for Azure
+                Managed Redis.
             db: Database index (default 0).
-            ssl: Enable TLS (default ``True``; required for Azure Cache for Redis).
+            ssl: Enable TLS (default ``True``; required by both products).
+            username: ACL username. Required by Azure Managed Redis; leave unset
+                for Azure Cache for Redis.
+            ssl_cert_reqs: Server-certificate policy: ``"required"`` (default),
+                ``"optional"``, or ``"none"``. Do not pass ``None`` — redis-py
+                resolves that to ``CERT_NONE``, silently disabling verification.
             decode_responses: When ``True``, reads return ``str`` instead of ``bytes``.
+            **client_kwargs: Overrides for the connection-resilience defaults
+                documented on ``resilient_client_kwargs``.
         """
         try:
             client = aioredis.Redis(
                 host=host,
                 port=port,
                 password=access_key,
+                username=username,
                 db=db,
                 ssl=ssl,
-                decode_responses=decode_responses,
+                ssl_cert_reqs=ssl_cert_reqs,
+                **resilient_client_kwargs(
+                    decode_responses=decode_responses, **client_kwargs
+                ),
             )
             return cls(client)
         except Exception as e:
-            raise CacheConnectionError(f"Failed to connect to Azure Cache for Redis: {e}") from e
+            raise CacheConnectionError(f"Failed to connect to Azure Redis: {e}") from e
 
     @classmethod
     def from_managed_identity(
@@ -65,6 +91,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         client_id: str | None = None,
         decode_responses: bool = False,
         credential_options: dict | None = None,
+        **client_kwargs,
     ) -> "AzureRedisCacheBackend":
         """Authenticate via Azure AD (Entra ID token auth).
 
@@ -82,6 +109,8 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
                        Omit to use the system-assigned identity.
             credential_options: Forwarded to ``DefaultAzureCredential`` — see
                        :mod:`cloudrift.core.azure_credentials`.
+            **client_kwargs: Overrides for the connection-resilience defaults
+                documented on ``resilient_client_kwargs``.
         """
         try:
             from cloudrift.core.azure_credentials import build_credential
@@ -94,7 +123,9 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
                 db=db,
                 ssl=ssl,
                 credential_provider=provider,
-                decode_responses=decode_responses,
+                **resilient_client_kwargs(
+                    decode_responses=decode_responses, **client_kwargs
+                ),
             )
             return cls(client)
         except Exception as e:
@@ -114,6 +145,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         db: int = 0,
         ssl: bool = True,
         decode_responses: bool = False,
+        **client_kwargs,
     ) -> "AzureRedisCacheBackend":
         """Authenticate via Azure AD service principal (Entra ID token auth).
 
@@ -129,6 +161,8 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
             port: Redis SSL port (default 6380).
             db: Database index (default 0).
             ssl: Enable TLS (default ``True``).
+            **client_kwargs: Overrides for the connection-resilience defaults
+                documented on ``resilient_client_kwargs``.
         """
         try:
             from azure.identity import ClientSecretCredential
@@ -142,7 +176,9 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
                 db=db,
                 ssl=ssl,
                 credential_provider=provider,
-                decode_responses=decode_responses,
+                **resilient_client_kwargs(
+                    decode_responses=decode_responses, **client_kwargs
+                ),
             )
             return cls(client)
         except Exception as e:

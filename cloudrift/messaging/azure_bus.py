@@ -336,6 +336,22 @@ class AzureServiceBusBackend(MessagingBackend):
             if not raw_messages:
                 await receiver.__aexit__(None, None, None)
                 return []
+            def _body_bytes(m) -> bytes:
+                # ServiceBusReceivedMessage.body is a generator of chunks for
+                # the common data body type, so bytes(m) raises TypeError.
+                # It is single-use, hence joining eagerly here.
+                raw = m.body
+                if isinstance(raw, bytes):
+                    return raw
+                if isinstance(raw, str):
+                    return raw.encode("utf-8")
+                if raw is None:
+                    return b""
+                chunks = [
+                    c if isinstance(c, bytes) else str(c).encode("utf-8") for c in raw
+                ]
+                return b"".join(chunks)
+
             tokens: set[str] = set()
             messages: list[Message] = []
             for m in raw_messages:
@@ -355,7 +371,7 @@ class AzureServiceBusBackend(MessagingBackend):
                 messages.append(
                     Message(
                         id=str(m.message_id or ""),
-                        body=bytes(m),
+                        body=_body_bytes(m),
                         receipt_handle=token,
                         attributes=attrs,
                         group_id=m.session_id,

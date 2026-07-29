@@ -1,6 +1,6 @@
 from urllib.parse import quote
 
-from cloudrift.cache.base import CacheBackend
+from cloudrift.cache.base import CacheBackend, resilient_client_kwargs
 
 _VALID_SSL_CERT_REQS = ("CERT_NONE", "CERT_OPTIONAL", "CERT_REQUIRED")
 
@@ -111,4 +111,4 @@ def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
     return factory(**kwargs)
 
 
-__all__ = ["CacheBackend", "get_cache", "cache_broker_url"]
+__all__ = ["CacheBackend", "get_cache", "cache_broker_url", "resilient_client_kwargs"]
