@@ -4,14 +4,19 @@ from contextlib import asynccontextmanager
 from cloudrift.core.exceptions import SQLAuthError, SQLConnectionError
 from cloudrift.sql.base import SQLBackend
 
+# Azure Database for PostgreSQL — Microsoft Entra (AAD) token scope. The access
+# token is used in place of a password; the DB user is the Entra principal name.
+_AAD_TOKEN_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
+
 
 class PostgresSQLBackend(SQLBackend):
     """PostgreSQL (and wire-compatible engines such as Amazon Redshift) backed by
     the async ``psycopg`` (v3) driver.
 
     Use one of the class methods to construct:
-    - ``from_credentials`` — static host/port/user/password
-    - ``from_iam_auth``    — AWS RDS/Aurora IAM authentication (token as password)
+    - ``from_credentials``            — static host/port/user/password
+    - ``from_iam_auth``               — AWS RDS/Aurora IAM authentication (token as password)
+    - ``from_entra_managed_identity`` — Azure Entra managed-identity token auth
     """
 
     dialect = "postgresql"
@@ -28,6 +33,8 @@ class PostgresSQLBackend(SQLBackend):
         password: str | None = None,
         iam: bool = False,
         region: str | None = None,
+        entra: bool = False,
+        client_id: str | None = None,
         connect_kwargs: dict | None = None,
         pool: bool = False,
         pool_min_size: int = 0,
@@ -40,6 +47,8 @@ class PostgresSQLBackend(SQLBackend):
         self._password = password
         self._iam = iam
         self._region = region
+        self._entra = entra
+        self._client_id = client_id
         self._connect_kwargs = connect_kwargs or {}
         self._pool_enabled = pool
         self._pool_min_size = pool_min_size
@@ -98,11 +107,13 @@ class PostgresSQLBackend(SQLBackend):
         for IAM auth, whose token cannot be embedded in a static URL."""
         from cloudrift.sql._url import build_sqlalchemy_url
 
-        if self._iam:
+        if self._iam or self._entra:
             from cloudrift.core.exceptions import SQLAuthError
 
             raise SQLAuthError(
-                "sqlalchemy_url() is unavailable for IAM auth (token is dynamic)."
+                "sqlalchemy_url() is unavailable for token auth (IAM/Entra tokens "
+                "are dynamic). Use connect()/acquire(), or pass a SQLAlchemy "
+                "do_connect hook that calls the backend for a fresh token."
             )
         scheme = driver or self._sa_scheme
         return build_sqlalchemy_url(
@@ -137,9 +148,65 @@ class PostgresSQLBackend(SQLBackend):
             connect_kwargs=connect_kwargs,
         )
 
+    @classmethod
+    def from_entra_managed_identity(
+        cls,
+        host: str,
+        port: int,
+        user: str,
+        database: str,
+        client_id: str | None = None,
+        **connect_kwargs,
+    ) -> "PostgresSQLBackend":
+        """Authenticate to Azure Database for PostgreSQL via a Microsoft Entra
+        managed identity (system- or user-assigned).
+
+        A short-lived Entra access token is generated on every :meth:`connect`
+        call and used in place of a password; ``user`` is the Entra principal
+        name configured on the server. ``client_id`` selects a user-assigned
+        identity (omit for the system-assigned one). Entra auth requires TLS, so
+        ``sslmode`` defaults to ``require`` unless overridden.
+        """
+        connect_kwargs.setdefault("sslmode", "require")
+        return cls(
+            host=host,
+            port=port,
+            user=user,
+            database=database,
+            entra=True,
+            client_id=client_id,
+            connect_kwargs=connect_kwargs,
+        )
+
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
+
+    async def _entra_token(self) -> str:
+        try:
+            from azure.identity.aio import (
+                DefaultAzureCredential,
+                ManagedIdentityCredential,
+            )
+        except ImportError as e:  # pragma: no cover - import guard
+            raise SQLAuthError(
+                "Entra managed-identity auth requires azure-identity. "
+                "Install cloudrift[azure]."
+            ) from e
+
+        try:
+            credential = (
+                ManagedIdentityCredential(client_id=self._client_id)
+                if self._client_id
+                else DefaultAzureCredential()
+            )
+            async with credential:
+                token = await credential.get_token(_AAD_TOKEN_SCOPE)
+            return token.token
+        except Exception as e:
+            raise SQLAuthError(
+                f"Failed to acquire Entra token for PostgreSQL: {e}"
+            ) from e
 
     async def _rds_token(self) -> str:
         try:
@@ -171,7 +238,12 @@ class PostgresSQLBackend(SQLBackend):
                 "PostgreSQL support requires psycopg. Install cloudrift[sql-postgres]."
             ) from e
 
-        password = await self._rds_token() if self._iam else self._password
+        if self._entra:
+            password = await self._entra_token()
+        elif self._iam:
+            password = await self._rds_token()
+        else:
+            password = self._password
         kwargs = dict(self._connect_kwargs)
         if timeout is not None:
             kwargs["connect_timeout"] = int(timeout)
