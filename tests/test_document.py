@@ -91,6 +91,37 @@ def test_documentdb_tls_cert_passes_cert_path(recorder):
     assert inst.kwargs["tlsCAFile"] == "/secrets/ca.pem"
 
 
+def test_documentdb_iam_auth_builds_mongodb_aws_uri(recorder):
+    get_mongodb(
+        "documentdb",
+        auth="iam",
+        host="cluster.docdb.amazonaws.com",
+        port=27017,
+        tls_ca_file="/etc/ssl/rds-ca-bundle.pem",
+    )
+    inst = recorder.instances[-1]
+    uri = inst.args[0]
+    assert uri.startswith("mongodb://cluster.docdb.amazonaws.com:27017/")
+    assert "authMechanism=MONGODB-AWS" in uri
+    assert "authSource=%24external" in uri
+    assert "tls=true" in uri
+    assert "retryWrites=false" in uri
+    # IAM URI carries no embedded credentials
+    assert "@" not in uri
+    assert inst.kwargs["tlsCAFile"] == "/etc/ssl/rds-ca-bundle.pem"
+    assert inst.kwargs["maxPoolSize"] == 100
+    assert inst.kwargs["minPoolSize"] == 0
+
+
+def test_documentdb_iam_auth_default_port_and_pool(recorder):
+    get_mongodb("documentdb", auth="iam", host="h", max_pool_size=250, min_pool_size=25)
+    inst = recorder.instances[-1]
+    assert inst.args[0].startswith("mongodb://h:27017/")
+    assert "tlsCAFile" not in inst.kwargs
+    assert inst.kwargs["maxPoolSize"] == 250
+    assert inst.kwargs["minPoolSize"] == 25
+
+
 def test_cosmos_account_key_builds_mongo_uri(recorder):
     get_mongodb("cosmos", account="myacct", account_key="raw+key/with=special")
     inst = recorder.instances[-1]

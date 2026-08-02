@@ -39,6 +39,9 @@ def get_mongodb(provider: str, **kwargs) -> AsyncIOMotorClient:
     if provider == "documentdb":
         from cloudrift.document import documentdb
 
+        if kwargs.pop("auth", None) == "iam":
+            return documentdb.connect_iam_auth(**kwargs)
+
         if "uri" in kwargs:
             return documentdb.connect_uri(**kwargs)
         if "tls_cert_key_file" in kwargs:
@@ -78,6 +81,9 @@ def get_mongodb_sync(provider: str, **kwargs) -> MongoClient:
     """
     if provider == "documentdb":
         from cloudrift.document import documentdb_sync
+
+        if kwargs.pop("auth", None) == "iam":
+            return documentdb_sync.connect_iam_auth(**kwargs)
 
         if "uri" in kwargs:
             return documentdb_sync.connect_uri(**kwargs)

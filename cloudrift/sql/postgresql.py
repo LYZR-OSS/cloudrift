@@ -129,6 +129,9 @@ class PostgresSQLBackend(SQLBackend):
         user: str,
         database: str,
         region: str,
+        pool: bool = False,
+        pool_min_size: int = 0,
+        pool_max_size: int = 10,
         **connect_kwargs,
     ) -> "PostgresSQLBackend":
         """Authenticate to AWS RDS/Aurora PostgreSQL using an IAM auth token.
@@ -136,6 +139,9 @@ class PostgresSQLBackend(SQLBackend):
         A short-lived (15 min) token is generated on every :meth:`connect` call
         and used in place of a password. IAM auth requires TLS, so ``sslmode``
         defaults to ``require`` unless overridden in ``connect_kwargs``.
+
+        Set ``pool=True`` to enable a ``psycopg_pool`` pool used by
+        :meth:`acquire`; each pooled connection mints its own fresh token.
         """
         connect_kwargs.setdefault("sslmode", "require")
         return cls(
@@ -146,6 +152,9 @@ class PostgresSQLBackend(SQLBackend):
             iam=True,
             region=region,
             connect_kwargs=connect_kwargs,
+            pool=pool,
+            pool_min_size=pool_min_size,
+            pool_max_size=pool_max_size,
         )
 
     @classmethod
@@ -156,6 +165,9 @@ class PostgresSQLBackend(SQLBackend):
         user: str,
         database: str,
         client_id: str | None = None,
+        pool: bool = False,
+        pool_min_size: int = 0,
+        pool_max_size: int = 10,
         **connect_kwargs,
     ) -> "PostgresSQLBackend":
         """Authenticate to Azure Database for PostgreSQL via a Microsoft Entra
@@ -176,6 +188,9 @@ class PostgresSQLBackend(SQLBackend):
             entra=True,
             client_id=client_id,
             connect_kwargs=connect_kwargs,
+            pool=pool,
+            pool_min_size=pool_min_size,
+            pool_max_size=pool_max_size,
         )
 
     # ------------------------------------------------------------------
@@ -277,20 +292,44 @@ class PostgresSQLBackend(SQLBackend):
                 "host": self._host,
                 "port": self._port,
                 "user": self._user,
-                "password": self._password,
                 "dbname": self._database,
                 **self._connect_kwargs,
             }
-            pool = AsyncConnectionPool(
+            pool_kwargs: dict = dict(
                 conninfo="",
                 kwargs=kwargs,
                 min_size=self._pool_min_size,
                 max_size=self._pool_max_size,
                 open=False,
             )
+            if self._iam or self._entra:
+                # Token auth: no static password. Each physical connection the
+                # pool opens mints its own fresh short-lived token (RDS IAM
+                # tokens last ~15 min) via a custom connection class.
+                pool_kwargs["connection_class"] = self._token_connection_class()
+            else:
+                kwargs["password"] = self._password
+            pool = AsyncConnectionPool(**pool_kwargs)
             await pool.open()
             self._pool = pool
         return self._pool
+
+    def _token_connection_class(self):
+        """Build a ``psycopg.AsyncConnection`` subclass that authenticates each
+        new physical pool connection with a freshly minted IAM/Entra token."""
+        import psycopg
+
+        backend = self
+
+        class _TokenConnection(psycopg.AsyncConnection):
+            @classmethod
+            async def connect(cls, conninfo="", **kwargs):
+                kwargs["password"] = await (
+                    backend._rds_token() if backend._iam else backend._entra_token()
+                )
+                return await super().connect(conninfo, **kwargs)
+
+        return _TokenConnection
 
     @asynccontextmanager
     async def acquire(self, timeout: float | None = None):
