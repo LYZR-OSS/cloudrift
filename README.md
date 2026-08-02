@@ -276,6 +276,16 @@ client = get_mongodb(
     max_pool_size=200,
 )
 
+# AWS DocumentDB via IAM auth (MONGODB-AWS) — credentials from the AWS chain
+# (env vars, ECS task role, EC2 instance profile); requires cloudrift[aws].
+client = get_mongodb(
+    "documentdb",
+    auth="iam",
+    host="cluster.docdb.amazonaws.com",
+    port=27017,
+    tls_ca_file="/etc/ssl/rds-ca-bundle.pem",
+)
+
 # Azure Cosmos DB (MongoDB API)
 client = get_mongodb("cosmos", connection_string="mongodb://...")
 client = get_mongodb("cosmos", account="myacct", account_key="...")
@@ -322,6 +332,9 @@ from cloudrift.document import get_mongodb_sync
 
 client = get_mongodb_sync("documentdb", uri="mongodb://...")
 client = get_mongodb_sync("cosmos", account="myacct", account_key="...")
+client = get_mongodb_sync(
+    "documentdb", auth="iam",
+    host="cluster.docdb.amazonaws.com", tls_ca_file="/etc/ssl/rds-ca-bundle.pem")
 
 users = client["lyzr"]["users"]
 users.insert_one({"name": "Alice"})

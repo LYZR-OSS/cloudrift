@@ -107,3 +107,40 @@ def connect_tls_cert(
         return AsyncIOMotorClient(uri, **kwargs)
     except Exception as e:
         raise DocumentConnectionError(f"Failed to connect to DocumentDB: {e}") from e
+
+
+def connect_iam_auth(
+    host: str,
+    port: int = 27017,
+    *,
+    tls_ca_file: str | None = None,
+    max_pool_size: int = 100,
+    min_pool_size: int = 0,
+    **client_kwargs,
+) -> AsyncIOMotorClient:
+    """Connect using AWS IAM authentication (``MONGODB-AWS`` mechanism).
+
+    Credentials are resolved from the standard AWS provider chain (environment,
+    ECS/EC2 instance role, etc.) by ``pymongo-auth-aws`` — install via
+    ``cloudrift[aws]``. IAM auth requires TLS, and the DocumentDB cluster must
+    have IAM authentication enabled.
+
+    Args:
+        host: DocumentDB cluster endpoint hostname.
+        port: Port number (DocumentDB default: 27017).
+        tls_ca_file: Optional path to the CA certificate bundle (PEM).
+        max_pool_size: Max connection pool size.
+        min_pool_size: Min connection pool size.
+    """
+    uri = (
+        f"mongodb://{host}:{port}/?tls=true&retryWrites=false"
+        "&authMechanism=MONGODB-AWS&authSource=%24external"
+    )
+    kwargs: dict = {"maxPoolSize": max_pool_size, "minPoolSize": min_pool_size}
+    if tls_ca_file:
+        kwargs["tlsCAFile"] = tls_ca_file
+    kwargs.update(client_kwargs)
+    try:
+        return AsyncIOMotorClient(uri, **kwargs)
+    except Exception as e:
+        raise DocumentConnectionError(f"Failed to connect to DocumentDB: {e}") from e

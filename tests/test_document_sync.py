@@ -57,6 +57,27 @@ def test_documentdb_uri_passes_pool_kwargs(recorder):
     assert inst.kwargs["tlsCAFile"] == "/etc/ssl/ca.pem"
 
 
+def test_documentdb_iam_auth_builds_mongodb_aws_uri(recorder):
+    get_mongodb_sync(
+        "documentdb",
+        auth="iam",
+        host="cluster.docdb.amazonaws.com",
+        port=27017,
+        tls_ca_file="/etc/ssl/rds-ca-bundle.pem",
+    )
+    inst = recorder.instances[-1]
+    uri = inst.args[0]
+    assert uri.startswith("mongodb://cluster.docdb.amazonaws.com:27017/")
+    assert "authMechanism=MONGODB-AWS" in uri
+    assert "authSource=%24external" in uri
+    assert "tls=true" in uri
+    assert "retryWrites=false" in uri
+    assert "@" not in uri
+    assert inst.kwargs["tlsCAFile"] == "/etc/ssl/rds-ca-bundle.pem"
+    assert inst.kwargs["maxPoolSize"] == 100
+    assert inst.kwargs["minPoolSize"] == 0
+
+
 def test_documentdb_credentials_url_encodes_password(recorder):
     get_mongodb_sync(
         "documentdb",
