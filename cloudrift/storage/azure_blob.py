@@ -271,26 +271,47 @@ class AzureBlobBackend(StorageBackend):
             self._raise(e, prefix)
 
     async def presigned_url(self, key: str, expires_in: int = 3600) -> str:
-        if not self._account_key:
-            raise StorageError(
-                "presigned_url requires account_key authentication. "
-                "Use from_connection_string or from_account_key."
-            )
+        expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        permission = BlobSasPermissions(read=True)
         try:
-            sas = generate_blob_sas(
-                account_name=self._service.account_name,
-                container_name=self.container,
-                blob_name=key,
-                account_key=self._account_key,
-                permission=BlobSasPermissions(read=True),
-                expiry=datetime.now(timezone.utc) + timedelta(seconds=expires_in),
-            )
-            return (
-                f"https://{self._service.account_name}.blob.core.windows.net/"
-                f"{self.container}/{key}?{sas}"
-            )
+            if self._account_key:
+                sas = generate_blob_sas(
+                    account_name=self._service.account_name,
+                    container_name=self.container,
+                    blob_name=key,
+                    account_key=self._account_key,
+                    permission=permission,
+                    expiry=expiry,
+                )
+            elif self._credential is not None:
+                # AAD-authenticated (managed identity / service principal): there
+                # is no raw account key to sign with locally, so request a
+                # short-lived user delegation key and sign with that instead.
+                # Requires the identity to hold a role granting
+                # Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey
+                # (e.g. Storage Blob Data Contributor/Owner) — the same role
+                # already required for blob read/write under managed identity.
+                start = datetime.now(timezone.utc) - timedelta(minutes=15)
+                delegation_key = await self._service.get_user_delegation_key(start, expiry)
+                sas = generate_blob_sas(
+                    account_name=self._service.account_name,
+                    container_name=self.container,
+                    blob_name=key,
+                    user_delegation_key=delegation_key,
+                    permission=permission,
+                    expiry=expiry,
+                )
+            else:
+                raise StorageError(
+                    "presigned_url requires account_key, connection_string, "
+                    "managed_identity, or service_principal authentication."
+                )
         except HttpResponseError as e:
             self._raise(e, key)
+        return (
+            f"https://{self._service.account_name}.blob.core.windows.net/"
+            f"{self.container}/{key}?{sas}"
+        )
 
     async def copy(self, src_key: str, dst_key: str, *, dst_bucket: str | None = None) -> str:
         target_container = dst_bucket or self.container

@@ -1208,7 +1208,7 @@ wheels = [
 
 [[package]]
 name = "lyzr-cloudrift"
-version = "0.2.10"
+version = "0.2.11"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1260,6 +1260,7 @@ dev = [
     { name = "azure-identity" },
     { name = "azure-keyvault-keys" },
     { name = "azure-servicebus" },
+    { name = "azure-storage-blob" },
     { name = "fakeredis" },
     { name = "httpx" },
     { name = "moto", extra = ["s3", "server"] },
@@ -1337,6 +1338,7 @@ requires-dist = [
     { name = "azure-servicebus", marker = "extra == 'dev'", specifier = ">=7.11.0" },
     { name = "azure-storage-blob", marker = "extra == 'all'", specifier = ">=12.19.0" },
     { name = "azure-storage-blob", marker = "extra == 'azure'", specifier = ">=12.19.0" },
+    { name = "azure-storage-blob", marker = "extra == 'dev'", specifier = ">=12.19.0" },
     { name = "cryptography", marker = "extra == 'all'", specifier = ">=42.0" },
     { name = "cryptography", marker = "extra == 'sql'", specifier = ">=42.0" },
     { name = "cryptography", marker = "extra == 'sql-mssql'", specifier = ">=42.0" },
