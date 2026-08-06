@@ -1,6 +1,5 @@
 import json
 
-import boto3
 import pytest
 from moto.server import ThreadedMotoServer
 
@@ -36,6 +35,7 @@ async def secrets_backend(moto_server):
 # set / get
 # ---------------------------------------------------------------------------
 
+
 async def test_set_and_get_secret(secrets_backend):
     await secrets_backend.set_secret("my/secret", "s3cr3t-value")
     value = await secrets_backend.get_secret("my/secret")
@@ -57,6 +57,7 @@ async def test_get_secret_not_found(secrets_backend):
 # get_secret_json
 # ---------------------------------------------------------------------------
 
+
 async def test_get_secret_json(secrets_backend):
     payload = {"db_host": "localhost", "db_port": 5432}
     await secrets_backend.set_secret("json/secret", json.dumps(payload))
@@ -68,6 +69,7 @@ async def test_get_secret_json(secrets_backend):
 # delete
 # ---------------------------------------------------------------------------
 
+
 async def test_delete_secret(secrets_backend):
     await secrets_backend.set_secret("to/delete", "bye")
     await secrets_backend.delete_secret("to/delete")
@@ -78,6 +80,7 @@ async def test_delete_secret(secrets_backend):
 # ---------------------------------------------------------------------------
 # list_secrets
 # ---------------------------------------------------------------------------
+
 
 async def test_list_secrets(secrets_backend):
     await secrets_backend.set_secret("svc/alpha", "a")
@@ -98,6 +101,7 @@ async def test_list_secrets_prefix(secrets_backend):
 # health_check
 # ---------------------------------------------------------------------------
 
+
 async def test_health_check(secrets_backend):
     assert await secrets_backend.health_check() is True
 
@@ -106,6 +110,9 @@ async def test_health_check(secrets_backend):
 # factory
 # ---------------------------------------------------------------------------
 
+
 def test_invalid_provider():
+    # Was "gcp_secret_manager" until GCP support landed; use a name that is
+    # genuinely unsupported so this keeps testing the fallthrough.
     with pytest.raises(ValueError, match="Unknown secrets provider"):
-        get_secrets("gcp_secret_manager", project="my-proj")
+        get_secrets("not_a_provider", project="my-proj")
