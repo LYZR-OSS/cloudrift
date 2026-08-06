@@ -1,8 +1,9 @@
 """Document database connection factory.
 
 Returns a configured :class:`motor.motor_asyncio.AsyncIOMotorClient` regardless
-of provider — both AWS DocumentDB and Azure Cosmos DB (MongoDB API) speak the
-MongoDB wire protocol, so the caller uses Motor's native async API directly.
+of provider — AWS DocumentDB, Azure Cosmos DB (MongoDB API), and Firestore with
+MongoDB compatibility all speak the MongoDB wire protocol, so the caller uses
+Motor's native async API directly.
 
     from cloudrift.document import get_mongodb
 
@@ -14,6 +15,7 @@ An optional synchronous variant, :func:`get_mongodb_sync`, returns a
 :class:`pymongo.MongoClient` with identical provider/auth routing for services
 that don't run an event loop.
 """
+
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
 
@@ -22,7 +24,7 @@ def get_mongodb(provider: str, **kwargs) -> AsyncIOMotorClient:
     """Factory to build an async MongoDB client for the given provider.
 
     Args:
-        provider: ``"documentdb"`` or ``"cosmos"``.
+        provider: ``"documentdb"``, ``"cosmos"``, or ``"firestore"``.
         **kwargs: Provider-specific config. Routed to the appropriate
             ``connect_*`` function based on which keys are present.
 
@@ -35,6 +37,11 @@ def get_mongodb(provider: str, **kwargs) -> AsyncIOMotorClient:
                     tls_cert_key_file="/path/to/client.pem")
         get_mongodb("cosmos", connection_string="mongodb://...")
         get_mongodb("cosmos", account="myacct", account_key="...")
+        get_mongodb("firestore", uid="f116f93a-...", location="nam5",
+                    database="mydb")                       # Google Cloud OIDC
+        get_mongodb("firestore", uid="...", location="nam5", database="mydb",
+                    username="u", password="p")            # SCRAM
+        get_mongodb("firestore", uri="mongodb://...firestore.goog:443/...")
     """
     if provider == "documentdb":
         from cloudrift.document import documentdb
@@ -55,8 +62,14 @@ def get_mongodb(provider: str, **kwargs) -> AsyncIOMotorClient:
             return cosmos.connect_connection_string(**kwargs)
         return cosmos.connect_account_key(**kwargs)
 
+    if provider == "firestore":
+        from cloudrift.document import firestore
+
+        return _route_firestore(firestore, kwargs)
+
     raise ValueError(
-        f"Unknown document DB provider: {provider!r}. Choose 'documentdb' or 'cosmos'."
+        f"Unknown document DB provider: {provider!r}. "
+        "Choose 'documentdb', 'cosmos', or 'firestore'."
     )
 
 
@@ -68,7 +81,7 @@ def get_mongodb_sync(provider: str, **kwargs) -> MongoClient:
     event loop.
 
     Args:
-        provider: ``"documentdb"`` or ``"cosmos"``.
+        provider: ``"documentdb"``, ``"cosmos"``, or ``"firestore"``.
         **kwargs: Provider-specific config. Routed to the appropriate
             ``connect_*`` function based on which keys are present.
 
@@ -78,6 +91,8 @@ def get_mongodb_sync(provider: str, **kwargs) -> MongoClient:
                          username="u", password="p")
         get_mongodb_sync("cosmos", connection_string="mongodb://...")
         get_mongodb_sync("cosmos", account="myacct", account_key="...")
+        get_mongodb_sync("firestore", uid="f116f93a-...", location="nam5",
+                         database="mydb")
     """
     if provider == "documentdb":
         from cloudrift.document import documentdb_sync
@@ -98,9 +113,36 @@ def get_mongodb_sync(provider: str, **kwargs) -> MongoClient:
             return cosmos_sync.connect_connection_string(**kwargs)
         return cosmos_sync.connect_account_key(**kwargs)
 
+    if provider == "firestore":
+        from cloudrift.document import firestore_sync
+
+        return _route_firestore(firestore_sync, kwargs)
+
     raise ValueError(
-        f"Unknown document DB provider: {provider!r}. Choose 'documentdb' or 'cosmos'."
+        f"Unknown document DB provider: {provider!r}. "
+        "Choose 'documentdb', 'cosmos', or 'firestore'."
     )
+
+
+def _route_firestore(module, kwargs: dict):
+    """Pick the Firestore ``connect_*`` function matching the keys given.
+
+    Shared by both factories so the async and sync routing cannot diverge —
+    unlike DocumentDB and Cosmos, Firestore has four auth paths, which is enough
+    branching to be worth stating once.
+    """
+    if "uri" in kwargs:
+        return module.connect_uri(**kwargs)
+    if "connection_string" in kwargs:
+        # Accept the Azure-style key too: `gcloud firestore databases
+        # connection-string` is literally called a connection string, so callers
+        # reach for both names.
+        return module.connect_uri(uri=kwargs.pop("connection_string"), **kwargs)
+    if "access_token" in kwargs:
+        return module.connect_access_token(**kwargs)
+    if "password" in kwargs:
+        return module.connect_scram(**kwargs)
+    return module.connect_oidc(**kwargs)
 
 
 __all__ = ["get_mongodb", "get_mongodb_sync"]

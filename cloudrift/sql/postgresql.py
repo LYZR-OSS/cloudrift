@@ -17,6 +17,7 @@ class PostgresSQLBackend(SQLBackend):
     - ``from_credentials``            — static host/port/user/password
     - ``from_iam_auth``               — AWS RDS/Aurora IAM authentication (token as password)
     - ``from_entra_managed_identity`` — Azure Entra managed-identity token auth
+    - ``from_gcp_iam_auth``           — Cloud SQL / AlloyDB IAM authentication (token as password)
     """
 
     dialect = "postgresql"
@@ -35,6 +36,8 @@ class PostgresSQLBackend(SQLBackend):
         region: str | None = None,
         entra: bool = False,
         client_id: str | None = None,
+        gcp_iam: bool = False,
+        gcp_credentials: dict | None = None,
         connect_kwargs: dict | None = None,
         pool: bool = False,
         pool_min_size: int = 0,
@@ -49,6 +52,12 @@ class PostgresSQLBackend(SQLBackend):
         self._region = region
         self._entra = entra
         self._client_id = client_id
+        self._gcp_iam = gcp_iam
+        # Raw from_gcp_iam_auth kwargs (service_account_file/info, prefer_metadata).
+        # The built google.auth Credentials object is cached separately, lazily,
+        # on first _auth_password() call — see that method.
+        self._gcp_iam_kwargs = gcp_credentials or {}
+        self._gcp_credentials = None
         self._connect_kwargs = connect_kwargs or {}
         self._pool_enabled = pool
         self._pool_min_size = pool_min_size
@@ -97,8 +106,12 @@ class PostgresSQLBackend(SQLBackend):
 
         p = parse_sql_url(url, default_port=5432)
         return cls.from_credentials(
-            host=p["host"], port=p["port"], user=p["user"],
-            password=p["password"], database=p["database"], **connect_kwargs,
+            host=p["host"],
+            port=p["port"],
+            user=p["user"],
+            password=p["password"],
+            database=p["database"],
+            **connect_kwargs,
         )
 
     def sqlalchemy_url(self, driver: str | None = None) -> str:
@@ -107,18 +120,22 @@ class PostgresSQLBackend(SQLBackend):
         for IAM auth, whose token cannot be embedded in a static URL."""
         from cloudrift.sql._url import build_sqlalchemy_url
 
-        if self._iam or self._entra:
+        if self._iam or self._entra or self._gcp_iam:
             from cloudrift.core.exceptions import SQLAuthError
 
             raise SQLAuthError(
-                "sqlalchemy_url() is unavailable for token auth (IAM/Entra tokens "
-                "are dynamic). Use connect()/acquire(), or pass a SQLAlchemy "
+                "sqlalchemy_url() is unavailable for token auth (IAM/Entra/GCP "
+                "tokens are dynamic). Use connect()/acquire(), or pass a SQLAlchemy "
                 "do_connect hook that calls the backend for a fresh token."
             )
         scheme = driver or self._sa_scheme
         return build_sqlalchemy_url(
-            scheme, host=self._host, port=self._port, user=self._user,
-            password=self._password, database=self._database,
+            scheme,
+            host=self._host,
+            port=self._port,
+            user=self._user,
+            password=self._password,
+            database=self._database,
         )
 
     @classmethod
@@ -193,6 +210,62 @@ class PostgresSQLBackend(SQLBackend):
             pool_max_size=pool_max_size,
         )
 
+    @classmethod
+    def from_gcp_iam_auth(
+        cls,
+        host: str,
+        user: str,
+        database: str,
+        port: int = 5432,
+        service_account_file: str | None = None,
+        service_account_info: dict | None = None,
+        prefer_metadata: bool = False,
+        **connect_kwargs,
+    ) -> "PostgresSQLBackend":
+        """Authenticate to Cloud SQL / AlloyDB for PostgreSQL with an IAM token.
+
+        The credential is built on first use and cached; its access token is
+        used in place of a password and refreshed automatically only once it
+        actually expires — never rebuilt or re-refreshed on every
+        :meth:`connect`. No database password is ever stored. Requires IAM
+        database authentication enabled on the instance and the principal added
+        as a database user with ``roles/cloudsql.instanceUser``.
+
+        ``user`` is the IAM principal's database username, which GCP derives
+        differently per engine: for PostgreSQL it is the service-account email
+        **with the ``.gserviceaccount.com`` suffix removed**
+        (``sa@project.iam``), and for a human it is the full email address.
+        cloudrift does not transform it — pass exactly what the instance's user
+        list shows.
+
+        IAM auth requires TLS, so ``sslmode`` defaults to ``require``.
+
+        Args:
+            host: Instance IP or the Cloud SQL Proxy / Auth Proxy address.
+            user: Database username for the IAM principal (see above).
+            database: Database name.
+            port: Port (default 5432).
+            service_account_file: Path to a service-account JSON key file.
+            service_account_info: Parsed service-account JSON.
+            prefer_metadata: Read the attached service account from the metadata
+                server — see :mod:`cloudrift.core.gcp_credentials`.
+            **connect_kwargs: Extra psycopg connection arguments.
+        """
+        connect_kwargs.setdefault("sslmode", "require")
+        return cls(
+            host=host,
+            port=port,
+            user=user,
+            database=database,
+            gcp_iam=True,
+            gcp_credentials={
+                "service_account_file": service_account_file,
+                "service_account_info": service_account_info,
+                "prefer_metadata": prefer_metadata,
+            },
+            connect_kwargs=connect_kwargs,
+        )
+
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
@@ -205,8 +278,7 @@ class PostgresSQLBackend(SQLBackend):
             )
         except ImportError as e:  # pragma: no cover - import guard
             raise SQLAuthError(
-                "Entra managed-identity auth requires azure-identity. "
-                "Install cloudrift[azure]."
+                "Entra managed-identity auth requires azure-identity. Install cloudrift[azure]."
             ) from e
 
         try:
@@ -219,9 +291,7 @@ class PostgresSQLBackend(SQLBackend):
                 token = await credential.get_token(_AAD_TOKEN_SCOPE)
             return token.token
         except Exception as e:
-            raise SQLAuthError(
-                f"Failed to acquire Entra token for PostgreSQL: {e}"
-            ) from e
+            raise SQLAuthError(f"Failed to acquire Entra token for PostgreSQL: {e}") from e
 
     async def _rds_token(self) -> str:
         try:
@@ -245,6 +315,28 @@ class PostgresSQLBackend(SQLBackend):
         except Exception as e:
             raise SQLAuthError(f"Failed to generate RDS IAM auth token: {e}") from e
 
+    async def _auth_password(self) -> str | None:
+        """Resolve the password for this connection, minting a token if needed.
+
+        Single resolution point for every auth mode — AWS RDS IAM, Azure Entra,
+        GCP Cloud SQL IAM, or a static password — so ``connect()`` and the pooled
+        token-connection class stay in sync.
+        """
+        if self._iam:
+            return await self._rds_token()
+        if self._entra:
+            return await self._entra_token()
+        if self._gcp_iam:
+            from cloudrift.sql._gcp_iam import (
+                build_cloud_sql_credentials,
+                cloud_sql_access_token,
+            )
+
+            if self._gcp_credentials is None:
+                self._gcp_credentials = build_cloud_sql_credentials(**self._gcp_iam_kwargs)
+            return await cloud_sql_access_token(self._gcp_credentials)
+        return self._password
+
     async def connect(self, timeout: float | None = None):
         try:
             import psycopg
@@ -253,12 +345,7 @@ class PostgresSQLBackend(SQLBackend):
                 "PostgreSQL support requires psycopg. Install cloudrift[sql-postgres]."
             ) from e
 
-        if self._entra:
-            password = await self._entra_token()
-        elif self._iam:
-            password = await self._rds_token()
-        else:
-            password = self._password
+        password = await self._auth_password()
         kwargs = dict(self._connect_kwargs)
         if timeout is not None:
             kwargs["connect_timeout"] = int(timeout)
@@ -302,7 +389,7 @@ class PostgresSQLBackend(SQLBackend):
                 max_size=self._pool_max_size,
                 open=False,
             )
-            if self._iam or self._entra:
+            if self._iam or self._entra or self._gcp_iam:
                 # Token auth: no static password. Each physical connection the
                 # pool opens mints its own fresh short-lived token (RDS IAM
                 # tokens last ~15 min) via a custom connection class.
@@ -324,9 +411,9 @@ class PostgresSQLBackend(SQLBackend):
         class _TokenConnection(psycopg.AsyncConnection):
             @classmethod
             async def connect(cls, conninfo="", **kwargs):
-                kwargs["password"] = await (
-                    backend._rds_token() if backend._iam else backend._entra_token()
-                )
+                # Route through the backend's single resolver so a pooled RDS IAM,
+                # Entra, or GCP IAM connection all mint their token the same way.
+                kwargs["password"] = await backend._auth_password()
                 return await super().connect(conninfo, **kwargs)
 
         return _TokenConnection

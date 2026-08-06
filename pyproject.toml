@@ -5,15 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "lyzr-cloudrift"
 version = "0.2.11"
-description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, SQL, crypto (KMS), pub/sub, and email"
+description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, SQL, crypto (KMS), pub/sub, and email across AWS, Azure, and GCP"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 keywords = [
-    "cloud", "aws", "azure", "s3", "blob", "sqs", "servicebus",
-    "documentdb", "cosmosdb", "redis", "elasticache", "cache",
-    "secrets", "keyvault", "sns", "eventgrid", "pubsub",
-    "email", "ses", "smtp",
+    "cloud", "aws", "azure", "gcp", "s3", "blob", "gcs", "sqs", "servicebus",
+    "documentdb", "cosmosdb", "firestore", "redis", "elasticache", "memorystore",
+    "cache", "secrets", "keyvault", "secret-manager", "sns", "eventgrid",
+    "pubsub", "kms", "email", "ses", "smtp",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -50,6 +50,19 @@ azure = [
     "motor>=3.3.0",           # Cosmos DB via MongoDB API
     "pymongo>=4.6.3",         # sync MongoDB driver (optional sync client)
     "redis[hiredis]>=5.0.0",  # Azure Cache for Redis
+]
+gcp = [
+    "google-auth>=2.28.0",                  # shared ADC chain (cloudrift.core.gcp_credentials)
+    "gcloud-aio-storage>=9.0.0",            # native async GCS (no first-party async client)
+    "google-cloud-pubsub>=2.20.0",          # async Pub/Sub (messaging + pub/sub categories)
+    "google-cloud-secret-manager>=2.18.0",  # async Secret Manager
+    "google-cloud-kms>=2.21.0",             # async Cloud KMS
+    # Firestore with MongoDB compatibility speaks the Mongo wire protocol.
+    # pymongo>=4.7 is the release that added Google Cloud OIDC auth; the
+    # SCRAM and connection-string paths work on the 4.6.3 floor.
+    "motor>=3.3.0",
+    "pymongo>=4.7",
+    "redis[hiredis]>=5.0.0",                # Memorystore for Redis / Valkey
 ]
 cache = [
     "redis[hiredis]>=5.0.0",
@@ -89,7 +102,12 @@ sql = [
 all = [
     "aioboto3>=13.0.0",
     "motor>=3.3.0",
-    "pymongo[aws]>=4.6.3",
+    "pymongo[aws]>=4.7",
+    "google-auth>=2.28.0",
+    "gcloud-aio-storage>=9.0.0",
+    "google-cloud-pubsub>=2.20.0",
+    "google-cloud-secret-manager>=2.18.0",
+    "google-cloud-kms>=2.21.0",
     "azure-storage-blob>=12.19.0",
     "azure-servicebus>=7.11.0",
     "azure-identity>=1.15.0",
@@ -112,7 +130,12 @@ dev = [
     "moto[s3,sqs,sns,ses,secretsmanager,kms,server]>=5.0",
     "aioboto3>=13.0.0",
     "motor>=3.3.0",
-    "pymongo[aws]>=4.6.3",
+    "pymongo[aws]>=4.7",
+    "google-auth>=2.28.0",
+    "gcloud-aio-storage>=9.0.0",
+    "google-cloud-pubsub>=2.20.0",
+    "google-cloud-secret-manager>=2.18.0",
+    "google-cloud-kms>=2.21.0",
     "fakeredis>=2.20.0",
     "httpx>=0.25.0",
     "ruff>=0.4.0",

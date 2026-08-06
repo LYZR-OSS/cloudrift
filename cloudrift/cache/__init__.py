@@ -18,14 +18,15 @@ def cache_broker_url(
     consume a :class:`CacheBackend` directly.
 
     Args:
-        provider: ``"redis"`` (self-hosted), ``"elasticache"`` (AWS), or
-            ``"azure_redis"``.
+        provider: ``"redis"`` (self-hosted), ``"elasticache"`` (AWS),
+            ``"azure_redis"``, or ``"memorystore"`` (GCP).
         host: Redis host.
         port: Redis port (6379 for plain, 6380 for TLS, 10000 for some Azure
-            tiers — pass the value the cluster actually listens on).
+            tiers, 6378 for Memorystore in-transit encryption — pass the value
+            the cluster actually listens on).
         password: Optional. Omit (or pass empty string) for unauthenticated
-            self-hosted Redis. For ``elasticache`` / ``azure_redis`` this is the
-            AUTH token / access key.
+            self-hosted Redis. For ``elasticache`` / ``azure_redis`` /
+            ``memorystore`` this is the AUTH token / access key / AUTH string.
         db: Redis database index.
         ssl_cert_reqs: TLS verification mode for cloud providers. One of
             ``CERT_NONE`` / ``CERT_OPTIONAL`` / ``CERT_REQUIRED`` (defaults to
@@ -33,8 +34,14 @@ def cache_broker_url(
 
     Notes:
         Token-based auth (ElastiCache IAM, Azure Managed Identity / Service
-        Principal) cannot be expressed in a static URL — for those, configure
-        the consumer (e.g. Celery) with a CredentialProvider instead of a URL.
+        Principal, Memorystore IAM) cannot be expressed in a static URL — for
+        those, configure the consumer (e.g. Celery) with a CredentialProvider
+        instead of a URL.
+
+        Memorystore leaves in-transit encryption off by default, so a
+        ``memorystore`` URL is only correct for an instance that has it enabled;
+        the CA cannot be expressed in the URL either, so a consumer verifying
+        the per-instance CA needs its own TLS configuration.
 
         Celery's Redis transport does not forward the ``ssl_cert_reqs`` query
         parameter to redis-py; when used as a Celery broker URL the value is
@@ -61,14 +68,11 @@ def cache_broker_url(
 
     if provider == "redis":
         return f"redis://{auth}{host}:{port}/{db}"
-    if provider in ("elasticache", "azure_redis"):
-        return (
-            f"rediss://{auth}{host}:{port}/{db}"
-            f"?ssl_cert_reqs={ssl_cert_reqs}"
-        )
+    if provider in ("elasticache", "azure_redis", "memorystore"):
+        return f"rediss://{auth}{host}:{port}/{db}?ssl_cert_reqs={ssl_cert_reqs}"
     raise ValueError(
         f"Unsupported cache provider for broker URL: {provider!r}. "
-        "Must be one of: 'redis', 'elasticache', 'azure_redis'."
+        "Must be one of: 'redis', 'elasticache', 'azure_redis', 'memorystore'."
     )
 
 
@@ -76,7 +80,8 @@ def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
     """Factory to instantiate a cache backend.
 
     Args:
-        provider: ``"redis"``, ``"elasticache"``, or ``"azure_redis"``
+        provider: ``"redis"``, ``"elasticache"``, ``"azure_redis"``, or
+            ``"memorystore"``
         auth_method: The factory classmethod to call on the backend class.
             See each backend for supported methods.
         **kwargs: Arguments forwarded to the chosen factory method.
@@ -92,6 +97,8 @@ def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
         get_cache("elasticache", "from_iam_auth", host="...", username="...", region="us-east-1")
         get_cache("azure_redis", "from_access_key", host="...", access_key="...")
         get_cache("azure_redis", "from_managed_identity", host="...", username="...")
+        get_cache("memorystore", "from_auth_string", host="10.0.0.3", auth_string="...")
+        get_cache("memorystore", "from_iam_auth", host="10.0.0.3")
     """
     if provider == "redis":
         from cloudrift.cache.redis_standalone import StandaloneRedisBackend as _Backend
@@ -99,10 +106,12 @@ def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
         from cloudrift.cache.redis_elasticache import AWSElastiCacheBackend as _Backend
     elif provider == "azure_redis":
         from cloudrift.cache.redis_azure import AzureRedisCacheBackend as _Backend
+    elif provider == "memorystore":
+        from cloudrift.cache.redis_memorystore import GCPMemorystoreBackend as _Backend
     else:
         raise ValueError(
             f"Unknown cache provider: {provider!r}. "
-            "Choose 'redis', 'elasticache', or 'azure_redis'."
+            "Choose 'redis', 'elasticache', 'azure_redis', or 'memorystore'."
         )
 
     factory = getattr(_Backend, auth_method, None)

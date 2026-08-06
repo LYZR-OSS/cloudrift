@@ -1,3 +1,5 @@
+from importlib.metadata import PackageNotFoundError, version
+
 from cloudrift.storage import get_storage
 from cloudrift.messaging import get_queue
 from cloudrift.document import get_mongodb, get_mongodb_sync
@@ -8,7 +10,10 @@ from cloudrift.crypto import get_crypto
 from cloudrift.pubsub import get_pubsub
 from cloudrift.email import get_email
 
-__version__ = "0.2.10"
+try:
+    __version__ = version("lyzr-cloudrift")
+except PackageNotFoundError:  # pragma: no cover - only when genuinely uninstalled
+    __version__ = "0.0.0+unknown"
 __all__ = [
     "get_storage",
     "get_queue",
