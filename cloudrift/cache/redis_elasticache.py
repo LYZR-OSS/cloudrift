@@ -14,7 +14,8 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
     - ``from_tls_cert``   — mTLS with client certificate and key files
     """
 
-    def __init__(self, client: aioredis.Redis) -> None:
+    def __init__(self, client: aioredis.Redis, raise_exception: bool = True) -> None:
+        super().__init__(raise_exception=raise_exception)
         self._client = client
 
     # ------------------------------------------------------------------
@@ -31,6 +32,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
         ssl: bool = True,
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        raise_exception: bool = True,
         **client_kwargs,
     ) -> "AWSElastiCacheBackend":
         """Connect using an ElastiCache AUTH token (shared secret).
@@ -61,7 +63,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
                     decode_responses=decode_responses, **client_kwargs
                 ),
             )
-            return cls(client)
+            return cls(client, raise_exception=raise_exception)
         except Exception as e:
             raise CacheConnectionError(f"Failed to connect to ElastiCache: {e}") from e
 
@@ -80,6 +82,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
         aws_session_token: str | None = None,
         profile_name: str | None = None,
         decode_responses: bool = False,
+        raise_exception: bool = True,
         **client_kwargs,
     ) -> "AWSElastiCacheBackend":
         """Connect using IAM-based authentication (ElastiCache Redis 7+ with IAM enabled).
@@ -124,7 +127,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
                     decode_responses=decode_responses, **client_kwargs
                 ),
             )
-            return cls(client)
+            return cls(client, raise_exception=raise_exception)
         except Exception as e:
             raise CacheConnectionError(f"Failed to connect to ElastiCache (IAM): {e}") from e
 
@@ -139,6 +142,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
         ssl_keyfile: str | None = None,
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        raise_exception: bool = True,
         **client_kwargs,
     ) -> "AWSElastiCacheBackend":
         """Connect using mutual TLS (mTLS) with a client certificate and key.
@@ -169,7 +173,7 @@ class AWSElastiCacheBackend(_RedisMixin, CacheBackend):
                     decode_responses=decode_responses, **client_kwargs
                 ),
             )
-            return cls(client)
+            return cls(client, raise_exception=raise_exception)
         except Exception as e:
             raise CacheConnectionError(f"Failed to connect to ElastiCache (mTLS): {e}") from e
 
