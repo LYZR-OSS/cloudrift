@@ -34,3 +34,4 @@ jobs:
       CS_READ_TOKEN: ${{ secrets.CS_READ_TOKEN }}
     with:
       fail_on_findings: false
+      resolve_deps: true
