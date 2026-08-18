@@ -14,7 +14,8 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
     - ``from_service_principal`` — Azure AD service principal via Entra ID token auth
     """
 
-    def __init__(self, client: aioredis.Redis) -> None:
+    def __init__(self, client: aioredis.Redis, raise_exception: bool = True) -> None:
+        super().__init__(raise_exception=raise_exception)
         self._client = client
 
     # ------------------------------------------------------------------
@@ -32,6 +33,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         username: str | None = None,
         ssl_cert_reqs: str = "required",
         decode_responses: bool = False,
+        raise_exception: bool = True,
         **client_kwargs,
     ) -> "AzureRedisCacheBackend":
         """Authenticate with an Azure Redis access key.
@@ -76,7 +78,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
                     decode_responses=decode_responses, **client_kwargs
                 ),
             )
-            return cls(client)
+            return cls(client, raise_exception=raise_exception)
         except Exception as e:
             raise CacheConnectionError(f"Failed to connect to Azure Redis: {e}") from e
 
@@ -91,6 +93,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         client_id: str | None = None,
         decode_responses: bool = False,
         credential_options: dict | None = None,
+        raise_exception: bool = True,
         **client_kwargs,
     ) -> "AzureRedisCacheBackend":
         """Authenticate via Azure AD (Entra ID token auth).
@@ -127,7 +130,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
                     decode_responses=decode_responses, **client_kwargs
                 ),
             )
-            return cls(client)
+            return cls(client, raise_exception=raise_exception)
         except Exception as e:
             raise CacheConnectionError(
                 f"Failed to connect to Azure Cache for Redis (Managed Identity): {e}"
@@ -145,6 +148,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
         db: int = 0,
         ssl: bool = True,
         decode_responses: bool = False,
+        raise_exception: bool = True,
         **client_kwargs,
     ) -> "AzureRedisCacheBackend":
         """Authenticate via Azure AD service principal (Entra ID token auth).
@@ -180,7 +184,7 @@ class AzureRedisCacheBackend(_RedisMixin, CacheBackend):
                     decode_responses=decode_responses, **client_kwargs
                 ),
             )
-            return cls(client)
+            return cls(client, raise_exception=raise_exception)
         except Exception as e:
             raise CacheConnectionError(
                 f"Failed to connect to Azure Cache for Redis (Service Principal): {e}"

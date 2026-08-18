@@ -1,6 +1,7 @@
 from urllib.parse import quote
 
 from cloudrift.cache.base import CacheBackend, resilient_client_kwargs
+from cloudrift.cache.null import NullCacheBackend
 
 _VALID_SSL_CERT_REQS = ("CERT_NONE", "CERT_OPTIONAL", "CERT_REQUIRED")
 
@@ -72,13 +73,15 @@ def cache_broker_url(
     )
 
 
-def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
+def get_cache(provider: str, auth_method: str = "", **kwargs) -> CacheBackend:
     """Factory to instantiate a cache backend.
 
     Args:
-        provider: ``"redis"``, ``"elasticache"``, or ``"azure_redis"``
+        provider: ``"redis"``, ``"elasticache"``, ``"azure_redis"``, or
+            ``"null"`` (a no-op backend for when no cache is configured —
+            see :class:`NullCacheBackend`; takes no auth_method/kwargs).
         auth_method: The factory classmethod to call on the backend class.
-            See each backend for supported methods.
+            See each backend for supported methods. Ignored for ``"null"``.
         **kwargs: Arguments forwarded to the chosen factory method.
 
     Returns:
@@ -92,7 +95,10 @@ def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
         get_cache("elasticache", "from_iam_auth", host="...", username="...", region="us-east-1")
         get_cache("azure_redis", "from_access_key", host="...", access_key="...")
         get_cache("azure_redis", "from_managed_identity", host="...", username="...")
+        get_cache("null")
     """
+    if provider == "null":
+        return NullCacheBackend(**kwargs)
     if provider == "redis":
         from cloudrift.cache.redis_standalone import StandaloneRedisBackend as _Backend
     elif provider == "elasticache":
@@ -102,7 +108,7 @@ def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
     else:
         raise ValueError(
             f"Unknown cache provider: {provider!r}. "
-            "Choose 'redis', 'elasticache', or 'azure_redis'."
+            "Choose 'redis', 'elasticache', 'azure_redis', or 'null'."
         )
 
     factory = getattr(_Backend, auth_method, None)
@@ -111,4 +117,4 @@ def get_cache(provider: str, auth_method: str, **kwargs) -> CacheBackend:
     return factory(**kwargs)
 
 
-__all__ = ["CacheBackend", "get_cache", "cache_broker_url", "resilient_client_kwargs"]
+__all__ = ["CacheBackend", "NullCacheBackend", "get_cache", "cache_broker_url", "resilient_client_kwargs"]

@@ -13,7 +13,8 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
     - ``from_tls_cert``    — mTLS with client certificate and key files
     """
 
-    def __init__(self, client: aioredis.Redis) -> None:
+    def __init__(self, client: aioredis.Redis, raise_exception: bool = True) -> None:
+        super().__init__(raise_exception=raise_exception)
         self._client = client
 
     # ------------------------------------------------------------------
@@ -26,6 +27,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         url: str,
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        raise_exception: bool = True,
         **client_kwargs,
     ) -> "StandaloneRedisBackend":
         """Connect using a Redis URL.
@@ -46,7 +48,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
             )
             if ssl_ca_certs:
                 kwargs["ssl_ca_certs"] = ssl_ca_certs
-            return cls(aioredis.from_url(url, **kwargs))
+            return cls(aioredis.from_url(url, **kwargs), raise_exception=raise_exception)
         except Exception as e:
             raise CacheConnectionError(f"Failed to connect to Redis: {e}") from e
 
@@ -62,6 +64,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         ssl_cert_reqs: str = "required",
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        raise_exception: bool = True,
         **client_kwargs,
     ) -> "StandaloneRedisBackend":
         """Connect using explicit host, port, and optional credentials.
@@ -101,7 +104,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
                     decode_responses=decode_responses, **client_kwargs
                 ),
             )
-            return cls(client)
+            return cls(client, raise_exception=raise_exception)
         except Exception as e:
             raise CacheConnectionError(f"Failed to connect to Redis: {e}") from e
 
@@ -117,6 +120,7 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
         ssl_keyfile: str | None = None,
         ssl_ca_certs: str | None = None,
         decode_responses: bool = False,
+        raise_exception: bool = True,
         **client_kwargs,
     ) -> "StandaloneRedisBackend":
         """Connect using mutual TLS (mTLS) with client certificate and key files.
@@ -150,6 +154,6 @@ class StandaloneRedisBackend(_RedisMixin, CacheBackend):
                     decode_responses=decode_responses, **client_kwargs
                 ),
             )
-            return cls(client)
+            return cls(client, raise_exception=raise_exception)
         except Exception as e:
             raise CacheConnectionError(f"Failed to connect to Redis (mTLS): {e}") from e
