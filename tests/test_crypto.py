@@ -13,6 +13,10 @@ def moto_server():
     server = ThreadedMotoServer(port=0)
     server.start()
     host, port = server._server.server_address
+    # A server bound to "0.0.0.0" (all interfaces) is not itself a connectable
+    # destination on Windows the way it is on Linux — dial loopback instead.
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
     yield f"http://{host}:{port}"
     server.stop()
 
