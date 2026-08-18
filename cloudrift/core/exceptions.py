@@ -51,6 +51,11 @@ class CacheKeyNotFoundError(CacheError):
     """Raised when the requested key does not exist."""
 
 
+class CacheLockError(CacheError):
+    """Raised when a distributed lock cannot be acquired within its timeout,
+    or when a lock operation is attempted by a caller that no longer holds it."""
+
+
 # Secret exceptions
 class SecretError(CloudRiftError):
     """Base exception for secret operations."""

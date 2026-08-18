@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 
 import pytest
@@ -8,9 +9,11 @@ from redis.exceptions import ReadOnlyError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from cloudrift.cache import get_cache, resilient_client_kwargs
+from cloudrift.cache.base import CacheBackend, Lock
 from cloudrift.cache.redis_azure import AzureRedisCacheBackend
 from cloudrift.cache.redis_elasticache import AWSElastiCacheBackend
 from cloudrift.cache.redis_standalone import StandaloneRedisBackend
+from cloudrift.core.exceptions import CacheLockError
 
 
 @pytest.fixture
@@ -26,6 +29,7 @@ async def cache():
 # ---------------------------------------------------------------------------
 # get / set / delete / exists
 # ---------------------------------------------------------------------------
+
 
 async def test_set_and_get(cache):
     await cache.set("k1", b"hello")
@@ -66,6 +70,7 @@ async def test_exists(cache):
 # expire / ttl
 # ---------------------------------------------------------------------------
 
+
 async def test_expire_and_ttl(cache):
     await cache.set("ex_key", b"v")
     assert await cache.expire("ex_key", 120)
@@ -86,6 +91,7 @@ async def test_ttl_missing_key(cache):
 # keys
 # ---------------------------------------------------------------------------
 
+
 async def test_keys_pattern(cache):
     await cache.set("foo:1", b"a")
     await cache.set("foo:2", b"b")
@@ -97,6 +103,7 @@ async def test_keys_pattern(cache):
 # ---------------------------------------------------------------------------
 # Hash commands
 # ---------------------------------------------------------------------------
+
 
 async def test_hset_hget(cache):
     result = await cache.hset("myhash", "field1", b"val1")
@@ -128,6 +135,7 @@ async def test_hdel(cache):
 # ---------------------------------------------------------------------------
 # Set commands
 # ---------------------------------------------------------------------------
+
 
 async def test_sadd_returns_newly_added(cache):
     assert await cache.sadd("s", b"a", b"b") == 2
@@ -175,6 +183,7 @@ async def test_sinter_no_keys_raises(cache):
 # List commands
 # ---------------------------------------------------------------------------
 
+
 async def test_lpush_lrange_llen(cache):
     await cache.lpush("mylist", b"c", b"b", b"a")
     assert await cache.llen("mylist") == 3
@@ -192,6 +201,7 @@ async def test_rpush(cache):
 # Counters
 # ---------------------------------------------------------------------------
 
+
 async def test_incr(cache):
     await cache.set("counter", b"10")
     val = await cache.incr("counter")
@@ -208,6 +218,7 @@ async def test_decr(cache):
 # mget / mset
 # ---------------------------------------------------------------------------
 
+
 async def test_mset_mget(cache):
     await cache.mset({"mk1": b"v1", "mk2": b"v2"})
     results = await cache.mget("mk1", "mk2", "mk3")
@@ -220,6 +231,7 @@ async def test_mset_mget(cache):
 # setex
 # ---------------------------------------------------------------------------
 
+
 async def test_setex(cache):
     await cache.setex("sk", b"hello", 60)
     assert await cache.get("sk") == b"hello"
@@ -228,8 +240,118 @@ async def test_setex(cache):
 
 
 # ---------------------------------------------------------------------------
+# Distributed lock
+# ---------------------------------------------------------------------------
+
+
+async def test_lock_is_released_on_exit(cache):
+    async with cache.lock("job:release", auto_extend=False):
+        assert await cache.exists("cloudrift:lock:job:release")
+    assert not await cache.exists("cloudrift:lock:job:release")
+
+
+async def test_lock_is_released_when_body_raises(cache):
+    with pytest.raises(ValueError):
+        async with cache.lock("job:raises", auto_extend=False):
+            raise ValueError("boom")
+    assert not await cache.exists("cloudrift:lock:job:raises")
+
+
+async def test_lock_excludes_concurrent_holder(cache):
+    async with cache.lock("job:contended", ttl=5, auto_extend=False):
+        with pytest.raises(CacheLockError, match="job:contended"):
+            async with cache.lock("job:contended", blocking_timeout=0.2, retry_interval=0.05):
+                pass  # pragma: no cover - must not be reached
+
+
+async def test_lock_blocks_until_released_then_acquires(cache):
+    order: list[str] = []
+
+    async def holder():
+        async with cache.lock("job:handoff", ttl=5, auto_extend=False):
+            order.append("holder-in")
+            await asyncio.sleep(0.2)
+            order.append("holder-out")
+
+    async def waiter():
+        await asyncio.sleep(0.05)  # let holder acquire first
+        async with cache.lock("job:handoff", blocking_timeout=2, retry_interval=0.02):
+            order.append("waiter-in")
+
+    await asyncio.gather(holder(), waiter())
+    assert order == ["holder-in", "holder-out", "waiter-in"]
+
+
+async def test_lock_does_not_collide_with_a_plain_key_of_the_same_name(cache):
+    await cache.set("job:namespaced", b"unrelated cache value")
+    async with cache.lock("job:namespaced", auto_extend=False):
+        assert await cache.get("job:namespaced") == b"unrelated cache value"
+
+
+async def test_release_lock_rejects_a_stale_fencing_token(cache):
+    """A holder that outlives its TTL must not be able to delete a lock some
+    other caller has since legitimately acquired for the same key."""
+    async with cache.lock("job:fencing", ttl=5, auto_extend=False) as first:
+        stale = Lock(key=first.key, token=first.token, ttl=first.ttl)
+    async with cache.lock("job:fencing", ttl=5, auto_extend=False):
+        assert await cache.release_lock(stale) is False
+        assert await cache.exists("cloudrift:lock:job:fencing")
+
+
+async def test_release_lock_is_idempotent(cache):
+    async with cache.lock("job:double_release", auto_extend=False) as held:
+        pass
+    assert await cache.release_lock(held) is False
+
+
+async def test_extend_lock_refreshes_ttl(cache):
+    async with cache.lock("job:extend", ttl=2, auto_extend=False) as held:
+        assert await cache.extend_lock(held, ttl=30) is True
+        remaining = await cache.ttl("cloudrift:lock:job:extend")
+        assert remaining > 2
+
+
+async def test_extend_lock_fails_for_a_lock_no_longer_held(cache):
+    async with cache.lock("job:extend_gone", ttl=5, auto_extend=False) as held:
+        pass
+    assert await cache.extend_lock(held, ttl=30) is False
+
+
+async def test_auto_extend_survives_a_critical_section_longer_than_ttl(cache):
+    """The default auto_extend=True watchdog must keep the lock alive past its
+    base ttl for as long as the `async with` block is still running."""
+    async with cache.lock("job:watchdog", ttl=0.3) as held:
+        await asyncio.sleep(0.8)
+        assert await cache.exists("cloudrift:lock:job:watchdog")
+        assert held.token == (await cache._client.get("cloudrift:lock:job:watchdog")).decode()
+    assert not await cache.exists("cloudrift:lock:job:watchdog")
+
+
+async def test_auto_extend_watchdog_is_cancelled_on_release(cache):
+    """Releasing must stop the background watchdog so it can never resurrect
+    a lock's TTL after the caller believes it has been released."""
+    async with cache.lock("job:watchdog_stop", ttl=0.3):
+        pass
+    await asyncio.sleep(0.5)  # longer than one watchdog tick
+    assert not await cache.exists("cloudrift:lock:job:watchdog_stop")
+
+
+async def test_lock_default_provider_raises_not_implemented():
+    """A backend that can't offer atomic conditional writes fails loudly
+    rather than silently providing no mutual exclusion. `lock()`'s default
+    body raises before ever reaching a `yield`, so the underlying function
+    (unwrapped from `@asynccontextmanager`) is a plain coroutine here —
+    exercised directly since every other abstract method on `CacheBackend`
+    is irrelevant to this contract.
+    """
+    with pytest.raises(NotImplementedError, match="does not support lock"):
+        await CacheBackend.lock.__wrapped__(object(), "x")
+
+
+# ---------------------------------------------------------------------------
 # ping / health_check / flush
 # ---------------------------------------------------------------------------
+
 
 async def test_ping(cache):
     assert await cache.ping() is True
@@ -250,6 +372,7 @@ async def test_flush(cache):
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
+
 
 def test_invalid_provider():
     with pytest.raises(ValueError, match="Unknown cache provider"):
@@ -303,9 +426,7 @@ def test_factory_sets_connection_resilience(provider, auth_method, kwargs):
 
 @pytest.mark.parametrize("provider,auth_method,kwargs", _FACTORIES)
 def test_factory_resilience_is_overridable(provider, auth_method, kwargs):
-    backend = get_cache(
-        provider, auth_method, health_check_interval=7, max_connections=5, **kwargs
-    )
+    backend = get_cache(provider, auth_method, health_check_interval=7, max_connections=5, **kwargs)
     pool = backend._client.connection_pool
     assert pool.connection_kwargs["health_check_interval"] == 7
     assert pool.max_connections == 5
