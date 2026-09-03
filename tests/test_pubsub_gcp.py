@@ -250,6 +250,13 @@ async def test_health_check_topic_accepts_a_fully_qualified_path():
     assert client.get_topic.await_args.kwargs["topic"] == TOPIC_PATH
 
 
-async def test_health_check_topic_passes_through_the_factory():
-    backend = get_pubsub("gcp_pubsub", project=PROJECT, health_check_topic=TOPIC)
+def test_health_check_topic_passes_through_the_factory():
+    """The factory forwards it via **kwargs, so no factory branch was needed.
+
+    build_credentials is patched because this constructs the backend for real —
+    unpatched, from_application_default reaches for ADC and fails wherever no
+    credentials exist (i.e. CI).
+    """
+    with patch("cloudrift.core.gcp_credentials.build_credentials", return_value=object()):
+        backend = get_pubsub("gcp_pubsub", project=PROJECT, health_check_topic=TOPIC)
     assert backend._health_check_topic == TOPIC
