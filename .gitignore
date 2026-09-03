@@ -5,11 +5,14 @@ __pycache__/
 *.so
 .Python
 
-# Virtualenvs
+# Virtualenvs — anchored to the repo root with a leading slash. Unanchored
+# `env/` matches a directory of that name at ANY depth, so it would also exclude
+# a package directory named `env` and silently drop it from the built wheel
+# (hatchling honours .gitignore when selecting files).
 .venv/
-venv/
-env/
-ENV/
+/venv/
+/env/
+/ENV/
 
 # Build / dist artifacts
 build/
@@ -30,8 +33,13 @@ pip-wheel-metadata/
 htmlcov/
 coverage.xml
 
-# Local-only dev / smoke-test scripts (kept out of source control)
-scripts/
+# Local-only dev / smoke-test scripts (kept out of source control), except the
+# GCP provisioning/teardown toolkit: the README documents it as the way to run
+# tests/integration, so leaving it untracked makes those instructions dangle.
+# (scripts/* not scripts/ — git cannot re-include a file whose parent directory
+# is itself excluded, so the negation below only works against the contents.)
+scripts/*
+!scripts/gcp_*
 
 # Editor / IDE
 .vscode/
@@ -43,7 +51,9 @@ scripts/
 .DS_Store
 Thumbs.db
 
-# Secrets / env
+# Secrets / env. Real dotenv files are ignored; *.example templates are not —
+# they are documentation and are referenced from the README.
 .env
 .env.*
 !.env.example
+!.env.*.example
