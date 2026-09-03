@@ -161,8 +161,14 @@ class MySQLSQLBackend(SQLBackend):
         — a different rule from PostgreSQL. cloudrift does not transform it; pass
         exactly what the instance's user list shows.
 
-        IAM auth requires TLS; configure ``ssl_ca`` / ``ssl_*`` via
-        ``connect_kwargs`` as your deployment requires.
+        IAM auth requires TLS, so ``ssl_disabled`` defaults to ``False`` — the
+        MySQL analog of the Postgres path's ``sslmode=require``: encrypt, but do
+        not verify the server certificate. That is already mysql-connector's own
+        default; setting it explicitly is what makes the requirement visible and
+        testable, and it means ``ssl_disabled=True`` has to be a deliberate
+        caller decision rather than an accident. To verify the server as well,
+        pass ``ssl_ca`` (and optionally ``ssl_verify_identity=True``) through
+        ``connect_kwargs``.
 
         Args:
             host: Instance IP or the Cloud SQL Auth Proxy address.
@@ -175,6 +181,7 @@ class MySQLSQLBackend(SQLBackend):
                 server — see :mod:`cloudrift.core.gcp_credentials`.
             **connect_kwargs: Extra mysql-connector arguments.
         """
+        connect_kwargs.setdefault("ssl_disabled", False)
         return cls(
             host=host,
             port=port,

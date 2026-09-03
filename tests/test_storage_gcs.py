@@ -128,6 +128,24 @@ async def test_list_iter_follows_page_tokens():
     assert storage.list_objects.await_args_list[1].kwargs["params"]["pageToken"] == "t1"
 
 
+async def test_list_collects_every_page():
+    """`list` is an async comprehension over the `list_iter` async generator.
+    Static analysis flags that expression as non-iterable (it is not — a method
+    defined with `async def` + `yield` is an async generator), so this asserts
+    the aggregation really does span pages before anyone "fixes" it.
+    """
+    storage = _storage()
+    storage.list_objects = AsyncMock(
+        side_effect=[
+            {"items": [{"name": "a"}, {"name": "b"}], "nextPageToken": "t1"},
+            {"items": [{"name": "c"}]},
+        ]
+    )
+    backend, _ = _backend(storage)
+    assert await backend.list() == ["a", "b", "c"]
+    assert storage.list_objects.await_count == 2
+
+
 async def test_list_applies_the_prefix():
     storage = _storage()
     storage.list_objects = AsyncMock(return_value={"items": [{"name": "logs/x"}]})

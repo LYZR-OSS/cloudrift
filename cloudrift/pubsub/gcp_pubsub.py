@@ -35,8 +35,10 @@ class GCPPubSubBackend(PubSubBackend):
         credentials=None,
         client_options: dict | None = None,
         publisher_options: dict | None = None,
+        health_check_topic: str | None = None,
     ) -> None:
         self.project = project
+        self._health_check_topic = health_check_topic
         self._credentials = credentials
         self._client_options = client_options or {}
         self._publisher_options = publisher_options or {}
@@ -169,13 +171,28 @@ class GCPPubSubBackend(PubSubBackend):
             self._raise(e, topic)
 
     async def health_check(self) -> bool:
+        """Report whether the Pub/Sub API is reachable.
+
+        Pub/Sub has no permission-free ping, so any probe needs a *read*
+        permission that ``roles/pubsub.publisher`` alone does not grant — a
+        publish-only identity will report unhealthy while publishing fine.
+
+        Pass ``health_check_topic=`` to narrow what that costs: ``get_topic``
+        needs ``pubsub.topics.get`` on that single topic, which can be granted
+        per-topic, rather than the project-wide ``pubsub.topics.list`` that
+        listing requires. The topic is not otherwise used — this backend
+        publishes to a topic named per call.
+        """
         try:
             client = await self._ensure()
-            pager = await client.list_topics(project=f"projects/{self.project}")
-            # The async pager is lazy — touch the first page so this actually
-            # proves the API is reachable.
-            async for _ in pager:
-                break
+            if self._health_check_topic is not None:
+                await client.get_topic(topic=self._topic_path(self._health_check_topic))
+            else:
+                pager = await client.list_topics(project=f"projects/{self.project}")
+                # The async pager is lazy — touch the first page so this actually
+                # proves the API is reachable.
+                async for _ in pager:
+                    break
             return True
         except Exception:
             return False

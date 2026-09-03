@@ -194,6 +194,26 @@ def test_mysql_gcp_iam_defaults():
     backend = MySQLSQLBackend.from_gcp_iam_auth(HOST, "sa-name", "app")
     assert backend._gcp_iam is True
     assert backend._port == 3306
+    # Cloud SQL IAM auth requires TLS. mysql-connector already defaults
+    # ssl_disabled to False, so this asserts the requirement is stated
+    # explicitly rather than inherited — the MySQL analog of the Postgres
+    # path's sslmode=require.
+    assert backend._connect_kwargs["ssl_disabled"] is False
+
+
+def test_mysql_gcp_iam_tls_can_be_disabled_deliberately():
+    """Opting out stays possible, but has to be explicit — it is not the default."""
+    backend = MySQLSQLBackend.from_gcp_iam_auth(HOST, "sa-name", "app", ssl_disabled=True)
+    assert backend._connect_kwargs["ssl_disabled"] is True
+
+
+def test_mysql_gcp_iam_accepts_server_verification():
+    backend = MySQLSQLBackend.from_gcp_iam_auth(
+        HOST, "sa-name", "app", ssl_ca="/etc/ssl/server-ca.pem", ssl_verify_identity=True
+    )
+    assert backend._connect_kwargs["ssl_ca"] == "/etc/ssl/server-ca.pem"
+    assert backend._connect_kwargs["ssl_verify_identity"] is True
+    assert backend._connect_kwargs["ssl_disabled"] is False
 
 
 async def test_mysql_gcp_iam_resolves_the_token_as_the_password():

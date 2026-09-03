@@ -36,6 +36,18 @@ def _published(client):
     return client.publish.await_args.kwargs
 
 
+def _empty_pager():
+    """An async pager that yields nothing — list_topics' lazy return value."""
+
+    async def _aiter():
+        return
+        yield  # pragma: no cover
+
+    pager = MagicMock()
+    pager.__aiter__ = lambda self: _aiter()
+    return pager
+
+
 # ---------------------------------------------------------------------------
 # publish
 # ---------------------------------------------------------------------------
@@ -189,3 +201,55 @@ def test_factory_routes_by_credential_keys():
 def test_unknown_provider_error_lists_gcp():
     with pytest.raises(ValueError, match="gcp_pubsub"):
         get_pubsub("nope")
+
+
+# ---------------------------------------------------------------------------
+# health_check — permission scope
+# ---------------------------------------------------------------------------
+
+
+async def test_health_check_lists_topics_by_default():
+    """Without a configured topic there is nothing specific to probe, so the
+    project-wide list is the only option left."""
+    client = _client()
+    client.list_topics = AsyncMock(return_value=_empty_pager())
+    backend = _backend(client)
+    assert await backend.health_check() is True
+    assert client.list_topics.await_args.kwargs["project"] == f"projects/{PROJECT}"
+
+
+async def test_health_check_topic_probes_that_topic_instead_of_listing():
+    """`pubsub.topics.get` on one topic can be granted per-topic, unlike the
+    project-wide `pubsub.topics.list` — so a narrowly-scoped identity can still
+    report healthy."""
+    client = _client()
+    client.get_topic = AsyncMock(return_value=MagicMock())
+    client.list_topics = AsyncMock()
+    backend = GCPPubSubBackend(PROJECT, health_check_topic=TOPIC)
+    backend._client = client
+
+    assert await backend.health_check() is True
+    assert client.get_topic.await_args.kwargs["topic"] == TOPIC_PATH
+    client.list_topics.assert_not_awaited()
+
+
+async def test_health_check_reports_false_when_the_probe_is_denied():
+    client = _client()
+    client.get_topic = AsyncMock(side_effect=PermissionDenied("no pubsub.topics.get"))
+    backend = GCPPubSubBackend(PROJECT, health_check_topic=TOPIC)
+    backend._client = client
+    assert await backend.health_check() is False
+
+
+async def test_health_check_topic_accepts_a_fully_qualified_path():
+    client = _client()
+    client.get_topic = AsyncMock(return_value=MagicMock())
+    backend = GCPPubSubBackend(PROJECT, health_check_topic=TOPIC_PATH)
+    backend._client = client
+    assert await backend.health_check() is True
+    assert client.get_topic.await_args.kwargs["topic"] == TOPIC_PATH
+
+
+async def test_health_check_topic_passes_through_the_factory():
+    backend = get_pubsub("gcp_pubsub", project=PROJECT, health_check_topic=TOPIC)
+    assert backend._health_check_topic == TOPIC
