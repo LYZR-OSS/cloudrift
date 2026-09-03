@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import datetime
 
 from aiohttp import ClientResponseError
@@ -381,8 +382,13 @@ class GCSBackend(StorageBackend):
             chunks.append(chunk)
         return await self.upload(key, b"".join(chunks), content_type=content_type)
 
-    async def list_iter(self, prefix: str = ""):
-        """Yield object keys lazily, one GCS page at a time (true pagination)."""
+    async def list_iter(self, prefix: str = "") -> AsyncIterator[str]:
+        """Yield object keys lazily, one GCS page at a time (true pagination).
+
+        The return annotation matches the base class and is what tells a static
+        analyser this is an async generator; without it the ``async for`` in
+        :meth:`list` gets reported as iterating a non-iterable.
+        """
         params = {"prefix": prefix} if prefix else {}
         while True:
             try:
