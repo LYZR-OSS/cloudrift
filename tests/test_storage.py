@@ -85,8 +85,10 @@ async def test_close_is_idempotent(s3_backend):
 
 
 def test_invalid_provider():
+    # Was "gcs" until GCP support landed; use a name that is genuinely
+    # unsupported so this keeps testing the fallthrough.
     with pytest.raises(ValueError, match="Unknown storage provider"):
-        get_storage("gcs", bucket="x")
+        get_storage("not_a_provider", bucket="x")
 
 
 # --- New tests for P0/P1 features ---

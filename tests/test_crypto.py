@@ -47,6 +47,7 @@ async def crypto_backend(moto_server, kms_key_id):
 # round-trip
 # ---------------------------------------------------------------------------
 
+
 async def test_encrypt_decrypt_bytes(crypto_backend):
     ciphertext = await crypto_backend.encrypt(b"top-secret-token")
     assert ciphertext != b"top-secret-token"
@@ -83,6 +84,7 @@ async def test_unicode_payload(crypto_backend):
 # context manager + decrypt without key_id
 # ---------------------------------------------------------------------------
 
+
 async def test_async_context_manager(moto_server, kms_key_id):
     async with get_crypto(
         "aws_kms",
@@ -115,9 +117,12 @@ async def test_encrypt_without_key_id_raises(moto_server):
 # factory routing
 # ---------------------------------------------------------------------------
 
+
 def test_get_crypto_unknown_provider():
+    # Was "gcp_kms" until GCP support landed; use a name that is genuinely
+    # unsupported so this keeps testing the fallthrough.
     with pytest.raises(ValueError, match="Unknown crypto provider"):
-        get_crypto("gcp_kms", key_id="x")
+        get_crypto("not_a_provider", key_id="x")
 
 
 def test_get_crypto_returns_aws_backend(moto_server):

@@ -9,7 +9,7 @@ def get_storage(provider: str, **kwargs) -> StorageBackend:
     connection pool across multiple buckets/containers.
 
     Args:
-        provider: ``"s3"`` or ``"azure_blob"``.
+        provider: ``"s3"``, ``"azure_blob"``, or ``"gcs"``.
         **kwargs: Provider-specific config. The factory routes to the appropriate
             ``from_*`` classmethod based on which credential keys are present.
 
@@ -24,6 +24,9 @@ def get_storage(provider: str, **kwargs) -> StorageBackend:
         get_storage("azure_blob", connection_string="...", container="my-container")
         get_storage("azure_blob", account_url="...", account_key="...", container="c")
         get_storage("azure_blob", account_url="...", sas_token="...", container="c")
+        get_storage("gcs", bucket="my-bucket")  # ADC
+        get_storage("gcs", bucket="b", service_account_file="/etc/gcp/sa.json")
+        get_storage("gcs", bucket="b", signer_service_account_email="svc@p.iam.gserviceaccount.com")
     """
     if provider == "s3":
         from cloudrift.storage.s3 import AWSS3Backend
@@ -49,19 +52,30 @@ def get_storage(provider: str, **kwargs) -> StorageBackend:
             return AzureBlobBackend.from_service_principal(**kwargs)
         return AzureBlobBackend.from_managed_identity(**kwargs)
 
-    raise ValueError(f"Unknown storage provider: {provider!r}. Choose 's3' or 'azure_blob'.")
+    if provider == "gcs":
+        from cloudrift.storage.gcs import GCSBackend
+
+        if "service_account_info" in kwargs:
+            return GCSBackend.from_service_account_info(**kwargs)
+        if "service_account_file" in kwargs:
+            return GCSBackend.from_service_account_file(**kwargs)
+        return GCSBackend.from_application_default(**kwargs)
+
+    raise ValueError(
+        f"Unknown storage provider: {provider!r}. Choose 's3', 'azure_blob', or 'gcs'."
+    )
 
 
 def get_storage_client(provider: str, **kwargs):
     """Factory to instantiate an account-scoped storage client.
 
-    Returns an :class:`AWSS3Client` or :class:`AzureBlobClient` that can serve
-    multiple buckets/containers from a single connection pool. Get a
-    :class:`StorageBackend` view via ``client.bucket(name)`` (S3) or
-    ``client.container(name)`` (Azure).
+    Returns an :class:`AWSS3Client`, :class:`AzureBlobClient`, or
+    :class:`GCSClient` that can serve multiple buckets/containers from a single
+    connection pool. Get a :class:`StorageBackend` view via
+    ``client.bucket(name)`` (S3, GCS) or ``client.container(name)`` (Azure).
 
     Args:
-        provider: ``"s3"`` or ``"azure_blob"``.
+        provider: ``"s3"``, ``"azure_blob"``, or ``"gcs"``.
         **kwargs: Same auth-method routing as :func:`get_storage`, but without
             ``bucket`` / ``container``.
 
@@ -96,7 +110,18 @@ def get_storage_client(provider: str, **kwargs):
             return AzureBlobClient.from_service_principal(**kwargs)
         return AzureBlobClient.from_managed_identity(**kwargs)
 
-    raise ValueError(f"Unknown storage provider: {provider!r}. Choose 's3' or 'azure_blob'.")
+    if provider == "gcs":
+        from cloudrift.storage.gcs import GCSClient
+
+        if "service_account_info" in kwargs:
+            return GCSClient.from_service_account_info(**kwargs)
+        if "service_account_file" in kwargs:
+            return GCSClient.from_service_account_file(**kwargs)
+        return GCSClient.from_application_default(**kwargs)
+
+    raise ValueError(
+        f"Unknown storage provider: {provider!r}. Choose 's3', 'azure_blob', or 'gcs'."
+    )
 
 
 __all__ = ["StorageBackend", "get_storage", "get_storage_client"]

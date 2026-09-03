@@ -47,6 +47,7 @@ async def pubsub_backend(moto_server):
 # publish
 # ---------------------------------------------------------------------------
 
+
 async def test_publish_returns_message_id(pubsub_backend, topic_arn):
     msg_id = await pubsub_backend.publish(topic_arn, "hello world")
     assert isinstance(msg_id, str)
@@ -65,6 +66,7 @@ async def test_publish_with_attributes(pubsub_backend, topic_arn):
 # ---------------------------------------------------------------------------
 # publish_batch
 # ---------------------------------------------------------------------------
+
 
 async def test_publish_batch(pubsub_backend, topic_arn):
     messages = [
@@ -88,6 +90,7 @@ async def test_publish_batch_more_than_10(pubsub_backend, topic_arn):
 # health_check
 # ---------------------------------------------------------------------------
 
+
 async def test_health_check(pubsub_backend):
     assert await pubsub_backend.health_check() is True
 
@@ -96,6 +99,9 @@ async def test_health_check(pubsub_backend):
 # factory
 # ---------------------------------------------------------------------------
 
+
 def test_invalid_provider():
+    # Was "gcp_pubsub" until GCP support landed; use a name that is genuinely
+    # unsupported so this keeps testing the fallthrough.
     with pytest.raises(ValueError, match="Unknown pubsub provider"):
-        get_pubsub("gcp_pubsub", project="my-proj")
+        get_pubsub("not_a_provider", project="my-proj")

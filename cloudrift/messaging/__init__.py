@@ -10,7 +10,7 @@ def get_queue(provider: str, **kwargs) -> MessagingBackend:
     """Factory to instantiate a messaging backend.
 
     Args:
-        provider: ``"sqs"`` or ``"azure_bus"``.
+        provider: ``"sqs"``, ``"azure_bus"``, or ``"gcp_pubsub"``.
         **kwargs: Provider-specific config. The factory routes to the appropriate
             ``from_*`` classmethod based on which credential keys are present.
 
@@ -25,6 +25,14 @@ def get_queue(provider: str, **kwargs) -> MessagingBackend:
         get_queue("azure_bus", connection_string="...", queue_name="my-queue")
         get_queue("azure_bus", fully_qualified_namespace="ns.servicebus.windows.net",
                    queue_name="q", client_id="...", client_secret="...", tenant_id="...")
+        get_queue("gcp_pubsub", project="p", topic="jobs", subscription="jobs-worker")
+        get_queue("gcp_pubsub", project="p", topic="jobs")        # send only
+        get_queue("gcp_pubsub", project="p", subscription="jobs-worker")  # receive only
+
+    Note:
+        Pub/Sub splits a queue into a topic (send) and a subscription (receive);
+        pass whichever halves the service uses. See
+        :class:`cloudrift.messaging.gcp_pubsub.GCPPubSubBackend`.
     """
     if provider == "sqs":
         from cloudrift.messaging.sqs import AWSSQSBackend
@@ -46,7 +54,18 @@ def get_queue(provider: str, **kwargs) -> MessagingBackend:
             return AzureServiceBusBackend.from_service_principal(**kwargs)
         return AzureServiceBusBackend.from_managed_identity(**kwargs)
 
-    raise ValueError(f"Unknown messaging provider: {provider!r}. Choose 'sqs' or 'azure_bus'.")
+    if provider == "gcp_pubsub":
+        from cloudrift.messaging.gcp_pubsub import GCPPubSubBackend
+
+        if "service_account_info" in kwargs:
+            return GCPPubSubBackend.from_service_account_info(**kwargs)
+        if "service_account_file" in kwargs:
+            return GCPPubSubBackend.from_service_account_file(**kwargs)
+        return GCPPubSubBackend.from_application_default(**kwargs)
+
+    raise ValueError(
+        f"Unknown messaging provider: {provider!r}. Choose 'sqs', 'azure_bus', or 'gcp_pubsub'."
+    )
 
 
 __all__ = [

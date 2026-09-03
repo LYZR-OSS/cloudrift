@@ -5,7 +5,7 @@ def get_pubsub(provider: str, **kwargs) -> PubSubBackend:
     """Factory to instantiate a pub/sub backend.
 
     Args:
-        provider: ``"sns"`` or ``"azure_eventgrid"``.
+        provider: ``"sns"``, ``"azure_eventgrid"``, or ``"gcp_pubsub"``.
         **kwargs: Provider-specific config. The factory routes to the appropriate
             ``from_*`` classmethod based on which credential keys are present.
 
@@ -18,6 +18,8 @@ def get_pubsub(provider: str, **kwargs) -> PubSubBackend:
         get_pubsub("azure_eventgrid", endpoint="https://...", access_key="...")
         get_pubsub("azure_eventgrid", endpoint="...", tenant_id="...",
                     client_id="...", client_secret="...")
+        get_pubsub("gcp_pubsub", project="my-project")  # ADC
+        get_pubsub("gcp_pubsub", project="p", service_account_file="/etc/gcp/sa.json")
     """
     if provider == "sns":
         from cloudrift.pubsub.sns import AWSSNSBackend
@@ -37,9 +39,17 @@ def get_pubsub(provider: str, **kwargs) -> PubSubBackend:
             return AzureEventGridBackend.from_service_principal(**kwargs)
         return AzureEventGridBackend.from_managed_identity(**kwargs)
 
+    if provider == "gcp_pubsub":
+        from cloudrift.pubsub.gcp_pubsub import GCPPubSubBackend
+
+        if "service_account_info" in kwargs:
+            return GCPPubSubBackend.from_service_account_info(**kwargs)
+        if "service_account_file" in kwargs:
+            return GCPPubSubBackend.from_service_account_file(**kwargs)
+        return GCPPubSubBackend.from_application_default(**kwargs)
+
     raise ValueError(
-        f"Unknown pubsub provider: {provider!r}. "
-        "Choose 'sns' or 'azure_eventgrid'."
+        f"Unknown pubsub provider: {provider!r}. Choose 'sns', 'azure_eventgrid', or 'gcp_pubsub'."
     )
 
 

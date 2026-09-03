@@ -1,0 +1,262 @@
+"""Tests for the GCP Pub/Sub fan-out backend.
+
+Pub/Sub serves two cloudrift categories: this one (the SNS analog — publish to a
+topic) and ``cloudrift.messaging.gcp_pubsub`` (the SQS analog — pull from a
+subscription). These tests cover the publish-only surface.
+"""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from google.api_core.exceptions import InvalidArgument, NotFound, PermissionDenied
+
+from cloudrift.core.exceptions import PubSubError, TopicNotFoundError
+from cloudrift.pubsub import get_pubsub
+from cloudrift.pubsub.gcp_pubsub import GCPPubSubBackend
+
+PROJECT = "test-project"
+TOPIC = "events"
+TOPIC_PATH = f"projects/{PROJECT}/topics/{TOPIC}"
+
+
+def _client(message_ids=("mid-1",)):
+    client = MagicMock()
+    client.publish = AsyncMock(return_value=MagicMock(message_ids=list(message_ids)))
+    client.transport.close = AsyncMock()
+    return client
+
+
+def _backend(client=None):
+    backend = GCPPubSubBackend(PROJECT)
+    backend._client = client if client is not None else _client()
+    return backend
+
+
+def _published(client):
+    return client.publish.await_args.kwargs
+
+
+def _empty_pager():
+    """An async pager that yields nothing — list_topics' lazy return value."""
+
+    async def _aiter():
+        return
+        yield  # pragma: no cover
+
+    pager = MagicMock()
+    pager.__aiter__ = lambda self: _aiter()
+    return pager
+
+
+# ---------------------------------------------------------------------------
+# publish
+# ---------------------------------------------------------------------------
+
+
+async def test_publish_returns_the_message_id():
+    client = _client(message_ids=("mid-42",))
+    assert await _backend(client).publish(TOPIC, "hello") == "mid-42"
+
+
+async def test_publish_encodes_the_body_to_bytes():
+    client = _client()
+    await _backend(client).publish(TOPIC, "hello world")
+    assert _published(client)["messages"][0].data == b"hello world"
+
+
+async def test_publish_resolves_a_bare_topic_id_against_the_project():
+    client = _client()
+    await _backend(client).publish(TOPIC, "x")
+    assert _published(client)["topic"] == TOPIC_PATH
+
+
+async def test_publish_passes_a_full_resource_name_through():
+    client = _client()
+    await _backend(client).publish(TOPIC_PATH, "x")
+    assert _published(client)["topic"] == TOPIC_PATH
+
+
+async def test_publish_maps_attributes_natively():
+    """Pub/Sub attributes are already string→string — no SNS DataType wrapper."""
+    client = _client()
+    await _backend(client).publish(TOPIC, "x", attributes={"event_type": "created"})
+    assert dict(_published(client)["messages"][0].attributes) == {"event_type": "created"}
+
+
+async def test_publish_stringifies_non_string_attribute_values():
+    client = _client()
+    await _backend(client).publish(TOPIC, "x", attributes={"version": 2, "ok": True})
+    attributes = dict(_published(client)["messages"][0].attributes)
+    assert attributes == {"version": "2", "ok": "True"}
+
+
+# ---------------------------------------------------------------------------
+# publish_batch
+# ---------------------------------------------------------------------------
+
+
+async def test_publish_batch_returns_all_ids():
+    client = _client(message_ids=("m1", "m2", "m3"))
+    ids = await _backend(client).publish_batch(
+        TOPIC,
+        [
+            {"message": "one", "attributes": {"seq": "1"}},
+            {"message": "two"},
+            {"message": "three"},
+        ],
+    )
+    assert ids == ["m1", "m2", "m3"]
+
+
+async def test_publish_batch_sends_one_request_for_more_than_ten():
+    """SNS caps a batch at 10 and the AWS backend chunks; Pub/Sub does not, so
+    chunking here would be wasted round trips."""
+    client = _client(message_ids=[f"m{i}" for i in range(25)])
+    ids = await _backend(client).publish_batch(TOPIC, [{"message": str(i)} for i in range(25)])
+    assert len(ids) == 25
+    client.publish.assert_awaited_once()
+    assert len(_published(client)["messages"]) == 25
+
+
+async def test_publish_batch_empty_is_a_no_op():
+    client = _client()
+    assert await _backend(client).publish_batch(TOPIC, []) == []
+    client.publish.assert_not_awaited()
+
+
+async def test_publish_batch_handles_a_message_without_a_body():
+    client = _client()
+    await _backend(client).publish_batch(TOPIC, [{"attributes": {"a": "b"}}])
+    assert _published(client)["messages"][0].data == b""
+
+
+# ---------------------------------------------------------------------------
+# Error translation — must match the SNS backend's mapping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (NotFound("missing"), TopicNotFoundError),
+        (PermissionDenied("denied"), PubSubError),
+        (InvalidArgument("bad"), PubSubError),
+    ],
+)
+async def test_native_errors_are_translated(exc, expected):
+    client = MagicMock()
+    client.publish = AsyncMock(side_effect=exc)
+    with pytest.raises(expected):
+        await _backend(client).publish(TOPIC, "x")
+
+
+async def test_topic_not_found_names_the_topic():
+    client = MagicMock()
+    client.publish = AsyncMock(side_effect=NotFound("missing"))
+    with pytest.raises(TopicNotFoundError, match=TOPIC):
+        await _backend(client).publish(TOPIC, "x")
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle + factory routing
+# ---------------------------------------------------------------------------
+
+
+async def test_close_closes_the_transport_and_is_idempotent():
+    client = _client()
+    backend = _backend(client)
+    await backend.close()
+    await backend.close()
+    client.transport.close.assert_awaited_once()
+
+
+async def test_context_manager_closes():
+    client = _client()
+    async with _backend(client):
+        pass
+    client.transport.close.assert_awaited_once()
+
+
+async def test_client_is_built_once_and_reused():
+    backend = GCPPubSubBackend(PROJECT)
+    with patch("cloudrift.pubsub.gcp_pubsub.PublisherAsyncClient") as ctor:
+        assert await backend._ensure() is await backend._ensure()
+    ctor.assert_called_once()
+
+
+def test_factory_routes_by_credential_keys():
+    with patch.object(GCPPubSubBackend, "from_service_account_file") as target:
+        get_pubsub("gcp_pubsub", project=PROJECT, service_account_file="/tmp/sa.json")
+    target.assert_called_once()
+
+    with patch.object(GCPPubSubBackend, "from_service_account_info") as target:
+        get_pubsub("gcp_pubsub", project=PROJECT, service_account_info={})
+    target.assert_called_once()
+
+    with patch.object(GCPPubSubBackend, "from_application_default") as target:
+        get_pubsub("gcp_pubsub", project=PROJECT)
+    target.assert_called_once()
+
+
+def test_unknown_provider_error_lists_gcp():
+    with pytest.raises(ValueError, match="gcp_pubsub"):
+        get_pubsub("nope")
+
+
+# ---------------------------------------------------------------------------
+# health_check — permission scope
+# ---------------------------------------------------------------------------
+
+
+async def test_health_check_lists_topics_by_default():
+    """Without a configured topic there is nothing specific to probe, so the
+    project-wide list is the only option left."""
+    client = _client()
+    client.list_topics = AsyncMock(return_value=_empty_pager())
+    backend = _backend(client)
+    assert await backend.health_check() is True
+    assert client.list_topics.await_args.kwargs["project"] == f"projects/{PROJECT}"
+
+
+async def test_health_check_topic_probes_that_topic_instead_of_listing():
+    """`pubsub.topics.get` on one topic can be granted per-topic, unlike the
+    project-wide `pubsub.topics.list` — so a narrowly-scoped identity can still
+    report healthy."""
+    client = _client()
+    client.get_topic = AsyncMock(return_value=MagicMock())
+    client.list_topics = AsyncMock()
+    backend = GCPPubSubBackend(PROJECT, health_check_topic=TOPIC)
+    backend._client = client
+
+    assert await backend.health_check() is True
+    assert client.get_topic.await_args.kwargs["topic"] == TOPIC_PATH
+    client.list_topics.assert_not_awaited()
+
+
+async def test_health_check_reports_false_when_the_probe_is_denied():
+    client = _client()
+    client.get_topic = AsyncMock(side_effect=PermissionDenied("no pubsub.topics.get"))
+    backend = GCPPubSubBackend(PROJECT, health_check_topic=TOPIC)
+    backend._client = client
+    assert await backend.health_check() is False
+
+
+async def test_health_check_topic_accepts_a_fully_qualified_path():
+    client = _client()
+    client.get_topic = AsyncMock(return_value=MagicMock())
+    backend = GCPPubSubBackend(PROJECT, health_check_topic=TOPIC_PATH)
+    backend._client = client
+    assert await backend.health_check() is True
+    assert client.get_topic.await_args.kwargs["topic"] == TOPIC_PATH
+
+
+def test_health_check_topic_passes_through_the_factory():
+    """The factory forwards it via **kwargs, so no factory branch was needed.
+
+    build_credentials is patched because this constructs the backend for real —
+    unpatched, from_application_default reaches for ADC and fails wherever no
+    credentials exist (i.e. CI).
+    """
+    with patch("cloudrift.core.gcp_credentials.build_credentials", return_value=object()):
+        backend = get_pubsub("gcp_pubsub", project=PROJECT, health_check_topic=TOPIC)
+    assert backend._health_check_topic == TOPIC
