@@ -131,17 +131,20 @@ class AzureKeyVaultKeysBackend(CryptoBackend):
 
         A fresh AES-256 key encrypts the payload with AES-GCM; only that 32-byte
         key is RSA-wrapped by the Key Vault key. The returned blob is
-        ``magic | uint16 wrapped_len | wrapped_key | nonce | aes_gcm_body``.
+        ``magic | uint16 wrapped_len | wrapped_key | nonce | aes_gcm_body``. The
+        header (everything before the body) is passed as AES-GCM associated data,
+        so the framing is authenticated and cannot be tampered with.
         """
         client = await self._ensure()
         data_key = os.urandom(_DATA_KEY_BYTES)
         nonce = os.urandom(_NONCE_BYTES)
         try:
-            body = AESGCM(data_key).encrypt(nonce, plaintext, None)
             wrapped = (await client.encrypt(self._algorithm, data_key)).ciphertext
+            header = _ENVELOPE_MAGIC + struct.pack(">H", len(wrapped)) + wrapped + nonce
+            body = AESGCM(data_key).encrypt(nonce, plaintext, header)
         except Exception as e:
             self._raise(e)
-        return b"".join((_ENVELOPE_MAGIC, struct.pack(">H", len(wrapped)), wrapped, nonce, body))
+        return header + body
 
     async def decrypt(self, ciphertext: bytes) -> bytes:
         client = await self._ensure()
@@ -154,17 +157,20 @@ class AzureKeyVaultKeysBackend(CryptoBackend):
             self._raise(e)
 
     async def _decrypt_envelope(self, client: CryptographyClient, ciphertext: bytes) -> bytes:
-        off = len(_ENVELOPE_MAGIC)
-        (wrapped_len,) = struct.unpack_from(">H", ciphertext, off)
-        off += 2
-        wrapped = ciphertext[off : off + wrapped_len]
-        off += wrapped_len
-        nonce = ciphertext[off : off + _NONCE_BYTES]
-        off += _NONCE_BYTES
-        body = ciphertext[off:]
+        # Parse inside the try so a truncated/malformed envelope surfaces as a
+        # cloudrift CryptoError, not a raw struct.error (backend-boundary rule).
         try:
+            off = len(_ENVELOPE_MAGIC)
+            (wrapped_len,) = struct.unpack_from(">H", ciphertext, off)
+            off += 2
+            wrapped = ciphertext[off : off + wrapped_len]
+            off += wrapped_len
+            nonce = ciphertext[off : off + _NONCE_BYTES]
+            off += _NONCE_BYTES
+            header = ciphertext[:off]
+            body = ciphertext[off:]
             data_key = (await client.decrypt(self._algorithm, wrapped)).plaintext
-            return AESGCM(data_key).decrypt(nonce, body, None)
+            return AESGCM(data_key).decrypt(nonce, body, header)
         except Exception as e:
             self._raise(e)
 
