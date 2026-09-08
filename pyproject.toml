@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lyzr-cloudrift"
-version = "0.3.0"
+version = "0.4.0"
 description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, SQL, crypto (KMS), pub/sub, and email across AWS, Azure, and GCP"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -46,6 +46,7 @@ azure = [
     "azure-identity>=1.15.0",
     "azure-keyvault-secrets>=4.7.0",
     "azure-keyvault-keys>=4.8.0",   # Key Vault keys crypto (KMS analog)
+    "cryptography>=50.0.1",         # AES-GCM data key for envelope encryption
     "azure-eventgrid>=4.9.0",
     "azure-communication-email>=1.0.0",
     "motor>=3.3.0",           # Cosmos DB via MongoDB API
@@ -151,6 +152,7 @@ dev = [
     "azure-storage-blob>=12.19.0",
     "azure-identity>=1.15.0",
     "azure-keyvault-keys>=4.8.0",
+    "cryptography>=50.0.1",
     "azure-servicebus>=7.11.0",
 ]
 

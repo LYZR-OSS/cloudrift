@@ -1,4 +1,6 @@
 import asyncio
+import os
+import struct
 
 from azure.core.exceptions import (
     ClientAuthenticationError,
@@ -7,6 +9,7 @@ from azure.core.exceptions import (
 from azure.identity.aio import ClientSecretCredential
 from azure.keyvault.keys.crypto import EncryptionAlgorithm
 from azure.keyvault.keys.crypto.aio import CryptographyClient
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from cloudrift.core.exceptions import (
     CryptoError,
@@ -14,6 +17,21 @@ from cloudrift.core.exceptions import (
     CryptoPermissionError,
 )
 from cloudrift.crypto.base import CryptoBackend
+
+# Envelope framing. RSA can only encrypt a payload smaller than the key (~190
+# bytes for RSA-2048 with OAEP-SHA256), which is far too small for real secrets
+# like OAuth tokens. So we envelope-encrypt: a random AES-256 data key encrypts
+# the payload (no size limit), and only that 32-byte key is RSA-wrapped by the
+# Key Vault key. The magic prefix lets decrypt tell an enveloped blob from a
+# legacy direct-RSA ciphertext written before this change.
+#
+# Keep this distinct from magics used by CONSUMERS' own envelope formats so the
+# two are never confused if a consumer ever stores a cloudrift-native blob
+# directly. Notably aci (aci/common/encryption.py) uses ``b"CRV1"`` for its own
+# envelope, so this must not be ``CRV1``.
+_ENVELOPE_MAGIC = b"CRK1"
+_DATA_KEY_BYTES = 32  # AES-256
+_NONCE_BYTES = 12  # AES-GCM standard nonce length
 
 
 class AzureKeyVaultKeysBackend(CryptoBackend):
@@ -24,9 +42,12 @@ class AzureKeyVaultKeysBackend(CryptoBackend):
     ``https://myvault.vault.azure.net/keys/mykey`` (or pinned to a version
     ``.../keys/mykey/<version>``).
 
-    The default algorithm is ``RSA-OAEP-256`` (RSA keys). RSA encryption has a
-    small payload ceiling (~190 bytes for RSA-2048); pass ``algorithm=`` for a
-    different key type, or wrap a data key for larger payloads.
+    The default algorithm is ``RSA-OAEP-256`` (RSA keys). RSA has a small payload
+    ceiling (~190 bytes for RSA-2048), so ``encrypt`` uses **envelope
+    encryption** — a random AES-256 data key encrypts the payload and only that
+    key is RSA-wrapped by the Key Vault key — which removes the size limit.
+    ``decrypt`` also transparently reads legacy direct-RSA ciphertexts written
+    before envelope mode. ``algorithm=`` selects a different key/wrap algorithm.
 
     Construct via:
     - ``from_service_principal`` — tenant_id / client_id / client_secret
@@ -111,18 +132,50 @@ class AzureKeyVaultKeysBackend(CryptoBackend):
     # ------------------------------------------------------------------
 
     async def encrypt(self, plaintext: bytes) -> bytes:
+        """Envelope-encrypt ``plaintext`` so any size works despite RSA's ceiling.
+
+        A fresh AES-256 key encrypts the payload with AES-GCM; only that 32-byte
+        key is RSA-wrapped by the Key Vault key. The returned blob is
+        ``magic | uint16 wrapped_len | wrapped_key | nonce | aes_gcm_body``. The
+        header (everything before the body) is passed as AES-GCM associated data,
+        so the framing is authenticated and cannot be tampered with.
+        """
         client = await self._ensure()
+        data_key = os.urandom(_DATA_KEY_BYTES)
+        nonce = os.urandom(_NONCE_BYTES)
         try:
-            result = await client.encrypt(self._algorithm, plaintext)
-            return result.ciphertext
+            wrapped = (await client.encrypt(self._algorithm, data_key)).ciphertext
+            header = _ENVELOPE_MAGIC + struct.pack(">H", len(wrapped)) + wrapped + nonce
+            body = AESGCM(data_key).encrypt(nonce, plaintext, header)
         except Exception as e:
             self._raise(e)
+        return header + body
 
     async def decrypt(self, ciphertext: bytes) -> bytes:
         client = await self._ensure()
+        if ciphertext[: len(_ENVELOPE_MAGIC)] == _ENVELOPE_MAGIC:
+            return await self._decrypt_envelope(client, ciphertext)
+        # Legacy: payloads written before envelope mode were RSA-encrypted whole.
         try:
-            result = await client.decrypt(self._algorithm, ciphertext)
-            return result.plaintext
+            return (await client.decrypt(self._algorithm, ciphertext)).plaintext
+        except Exception as e:
+            self._raise(e)
+
+    async def _decrypt_envelope(self, client: CryptographyClient, ciphertext: bytes) -> bytes:
+        # Parse inside the try so a truncated/malformed envelope surfaces as a
+        # cloudrift CryptoError, not a raw struct.error (backend-boundary rule).
+        try:
+            off = len(_ENVELOPE_MAGIC)
+            (wrapped_len,) = struct.unpack_from(">H", ciphertext, off)
+            off += 2
+            wrapped = ciphertext[off : off + wrapped_len]
+            off += wrapped_len
+            nonce = ciphertext[off : off + _NONCE_BYTES]
+            off += _NONCE_BYTES
+            header = ciphertext[:off]
+            body = ciphertext[off:]
+            data_key = (await client.decrypt(self._algorithm, wrapped)).plaintext
+            return AESGCM(data_key).decrypt(nonce, body, header)
         except Exception as e:
             self._raise(e)
 
