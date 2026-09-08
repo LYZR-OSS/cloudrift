@@ -24,7 +24,12 @@ from cloudrift.crypto.base import CryptoBackend
 # the payload (no size limit), and only that 32-byte key is RSA-wrapped by the
 # Key Vault key. The magic prefix lets decrypt tell an enveloped blob from a
 # legacy direct-RSA ciphertext written before this change.
-_ENVELOPE_MAGIC = b"CRV1"
+#
+# Keep this distinct from magics used by CONSUMERS' own envelope formats so the
+# two are never confused if a consumer ever stores a cloudrift-native blob
+# directly. Notably aci (aci/common/encryption.py) uses ``b"CRV1"`` for its own
+# envelope, so this must not be ``CRV1``.
+_ENVELOPE_MAGIC = b"CRK1"
 _DATA_KEY_BYTES = 32  # AES-256
 _NONCE_BYTES = 12  # AES-GCM standard nonce length
 
