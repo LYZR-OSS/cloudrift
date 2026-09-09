@@ -606,7 +606,7 @@ def test_assume_role_omits_external_id_when_absent():
 
 
 def _credential_methods(backend):
-    resolver = backend._session._session.get_component("credential_provider")
+    resolver = backend._session.get_component("credential_provider")
     return [p.METHOD for p in resolver.providers]
 
 

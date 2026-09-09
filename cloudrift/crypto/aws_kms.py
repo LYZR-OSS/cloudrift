@@ -1,9 +1,10 @@
 import asyncio
 
-import aioboto3
+from aiobotocore.session import AioSession
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from cloudrift.core.aws_session import build_session
 from cloudrift.core.exceptions import (
     CryptoError,
     CryptoKeyNotFoundError,
@@ -13,7 +14,7 @@ from cloudrift.crypto.base import CryptoBackend
 
 
 class AWSKMSBackend(CryptoBackend):
-    """AWS KMS crypto backend (native async via ``aioboto3``).
+    """AWS KMS crypto backend (native async via ``aiobotocore``).
 
     Encrypts/decrypts directly against a symmetric KMS key — the same
     ``Encrypt`` / ``Decrypt`` calls the AWS SDK makes, so ciphertext is
@@ -31,7 +32,7 @@ class AWSKMSBackend(CryptoBackend):
 
     def __init__(
         self,
-        session: aioboto3.Session,
+        session: AioSession,
         key_id: str | None = None,
         *,
         encryption_context: dict | None = None,
@@ -70,11 +71,11 @@ class AWSKMSBackend(CryptoBackend):
         **kwargs,
     ) -> "AWSKMSBackend":
         """Authenticate with explicit access key / secret."""
-        session = aioboto3.Session(
+        session = build_session(
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
             aws_session_token=aws_session_token,
-            region_name=region,
+            region=region,
         )
         return cls(session, key_id, **kwargs)
 
@@ -86,7 +87,7 @@ class AWSKMSBackend(CryptoBackend):
         **kwargs,
     ) -> "AWSKMSBackend":
         """Authenticate via IAM role / instance profile / environment variables."""
-        session = aioboto3.Session(region_name=region)
+        session = build_session(region=region)
         return cls(session, key_id, **kwargs)
 
     @classmethod
@@ -98,7 +99,7 @@ class AWSKMSBackend(CryptoBackend):
         **kwargs,
     ) -> "AWSKMSBackend":
         """Authenticate using a named profile from ``~/.aws/credentials``."""
-        session = aioboto3.Session(profile_name=profile_name, region_name=region)
+        session = build_session(profile_name=profile_name, region=region)
         return cls(session, key_id, **kwargs)
 
     # ------------------------------------------------------------------
@@ -110,7 +111,7 @@ class AWSKMSBackend(CryptoBackend):
             return self._client
         async with self._lock:
             if self._client is None:
-                self._client_cm = self._session.client(
+                self._client_cm = self._session.create_client(
                     "kms",
                     endpoint_url=self._endpoint_url,
                     config=self._config,
