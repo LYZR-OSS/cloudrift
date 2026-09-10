@@ -2,16 +2,17 @@ import asyncio
 import json
 import uuid
 
-import aioboto3
+from aiobotocore.session import AioSession
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from cloudrift.core.aws_session import build_session
 from cloudrift.core.exceptions import PubSubError, PublishError, TopicNotFoundError
 from cloudrift.pubsub.base import PubSubBackend
 
 
 class AWSSNSBackend(PubSubBackend):
-    """AWS SNS pub/sub backend (native async via ``aioboto3``).
+    """AWS SNS pub/sub backend (native async via ``aiobotocore``).
 
     A single async SNS client is created lazily on first use and reused for
     the lifetime of the backend.
@@ -24,7 +25,7 @@ class AWSSNSBackend(PubSubBackend):
 
     def __init__(
         self,
-        session: aioboto3.Session,
+        session: AioSession,
         *,
         endpoint_url: str | None = None,
         max_pool_connections: int = 25,
@@ -59,11 +60,11 @@ class AWSSNSBackend(PubSubBackend):
         **kwargs,
     ) -> "AWSSNSBackend":
         """Authenticate with explicit access key / secret."""
-        session = aioboto3.Session(
+        session = build_session(
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
             aws_session_token=aws_session_token,
-            region_name=region,
+            region=region,
         )
         return cls(session, endpoint_url=endpoint_url, **kwargs)
 
@@ -75,7 +76,7 @@ class AWSSNSBackend(PubSubBackend):
         **kwargs,
     ) -> "AWSSNSBackend":
         """Authenticate via IAM role / instance profile / environment variables."""
-        session = aioboto3.Session(region_name=region)
+        session = build_session(region=region)
         return cls(session, endpoint_url=endpoint_url, **kwargs)
 
     @classmethod
@@ -87,7 +88,7 @@ class AWSSNSBackend(PubSubBackend):
         **kwargs,
     ) -> "AWSSNSBackend":
         """Authenticate using a named profile from ``~/.aws/credentials``."""
-        session = aioboto3.Session(profile_name=profile_name, region_name=region)
+        session = build_session(profile_name=profile_name, region=region)
         return cls(session, endpoint_url=endpoint_url, **kwargs)
 
     # ------------------------------------------------------------------
@@ -99,7 +100,7 @@ class AWSSNSBackend(PubSubBackend):
             return self._client
         async with self._lock:
             if self._client is None:
-                self._client_cm = self._session.client(
+                self._client_cm = self._session.create_client(
                     "sns",
                     endpoint_url=self._endpoint_url,
                     config=self._config,

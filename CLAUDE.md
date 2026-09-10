@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`lyzr-cloudrift` is a cloud-agnostic abstraction layer for Lyzr microservices, covering nine categories: **storage**, **messaging**, **document DB**, **cache**, **secrets**, **SQL**, **crypto (KMS)**, **pub/sub**, and **email**. Each category exposes the same interface across AWS, Azure, GCP, and (for cache/email) self-hosted backends, so a service swaps providers by changing a single string. Everything is **async-first** — public methods are `async def`, backed by native-async SDK clients (`aioboto3`, `azure.*.aio`, `gcloud-aio-storage`, Google async GAPIC clients, `motor`, `redis.asyncio`, `aiosmtplib`); there is no thread-pool wrapping. The one deliberate exception: the document category also exposes an **optional sync factory** (`get_mongodb_sync`, returning a raw `pymongo.MongoClient`) for services that don't run an event loop.
+`lyzr-cloudrift` is a cloud-agnostic abstraction layer for Lyzr microservices, covering ten categories: **storage**, **messaging**, **document DB**, **cache**, **secrets**, **SQL**, **crypto (KMS)**, **pub/sub**, **email**, and **sandbox**. Each category exposes the same interface across AWS, Azure, GCP, and (for cache/email) self-hosted backends, so a service swaps providers by changing a single string. Everything is **async-first** — public methods are `async def`, backed by native-async SDK clients (`aiobotocore`, `azure.*.aio`, `gcloud-aio-storage`, Google async GAPIC clients, `motor`, `redis.asyncio`, `aiosmtplib`); there is no thread-pool wrapping. The one deliberate exception: the document category also exposes an **optional sync factory** (`get_mongodb_sync`, returns a plain `pymongo` client) for callers on sync frameworks.
 
 ## Commands
 
@@ -27,7 +27,7 @@ CI: pushes to `develop` test + publish to TestPyPI; pushes to `main` test + publ
 
 ## Architecture
 
-Eight of the nine categories (all but document) are self-contained packages under `cloudrift/` following an identical three-part shape:
+Nine of the ten categories (all but document) are self-contained packages under `cloudrift/` following an identical three-part shape:
 
 1. **`base.py`** — an `ABC` defining the provider-neutral interface (e.g. `StorageBackend`, `CacheBackend`, `MessagingBackend`). All `@abstractmethod`s are async. Concrete, non-abstract helpers (`__aenter__`/`__aexit__`, `health_check`, default `pipeline`) live here too.
 2. **Per-provider modules** — e.g. `s3.py` + `azure_blob.py`, `redis_standalone.py` + `redis_elasticache.py` + `redis_azure.py`. Each subclasses the ABC and is constructed **only** via `from_*` classmethods (`from_iam_role`, `from_access_key`, `from_connection_string`, `from_managed_identity`, etc.) — never a bare `__init__` with credentials.
@@ -41,12 +41,28 @@ The document category deliberately has **no `base.py` ABC and no backend wrapper
 
 GCP is **Firestore with MongoDB compatibility**, not classic Firestore — that mode is the only Firestore flavor speaking the Mongo wire protocol, so it is the only one that fits the category's return-type contract. Classic Firestore's document API would need a wrapper, which is exactly what this package refuses to have. Firestore imposes three non-negotiable URI options (`loadBalanced=true`, `tls=true`, `retryWrites=false`); getting any wrong surfaces as an opaque server-selection timeout, so URI construction lives in **`document/_firestore_uri.py`** (shared by the async and sync modules, like `sql/_url.py`) and applies them on every path — including to a caller-supplied connection string, via `ensure_required_params`. Because both factories now have four auth paths, the routing is shared in `_route_firestore` so async and sync cannot diverge. OIDC auth needs `pymongo>=4.7`, which is why the `gcp` extra raises that floor above the base `4.6.3`.
 
+### Sandbox exec server is different — one intentional top-level module
+
+`cloudrift_sandbox_server.py`, at the repo root next to `pyproject.toml`, is
+the **one intentional exception** to "everything lives under `cloudrift/`".
+It is the guest-side half of the `cloudrift.sandbox` wire protocol — the
+process that runs inside a Lambda MicroVM or ACA container and answers
+`GET /health` / `POST /exec` — and it ships in the same wheel as the client
+so the two can never drift apart on a release. It must stay **stdlib-only**
+and must **never import `cloudrift`**: `cloudrift/__init__.py` eagerly
+imports every category, and the `document`/`cache` categories pull in
+`motor`/`pymongo`/`redis` at import time, none of which a sandbox guest
+should need. `tests/test_sandbox_server.py::test_client_and_server_protocol_constants_agree`
+guards the constants (`EXEC_PORT`, `WORKDIR`, `MAX_OUTPUT_BYTES`,
+`TIMEOUT_EXIT_CODE`) that are duplicated between this module and
+`cloudrift/sandbox/base.py` — update both sides together.
+
 ### Two factory-dispatch styles — don't conflate them
 
 - **Cache and SQL** use an explicit auth-method argument: `get_cache(provider, auth_method, **kwargs)` / `get_sql(provider, auth_method, **kwargs)` where `auth_method` is the literal `from_*` method name (e.g. `get_cache("redis", "from_url", url=...)`).
 - **All other categories** infer the constructor from **which credential keys are present** in `**kwargs`: `get_storage(provider, **kwargs)` calls `from_access_key` if `aws_access_key_id` is present, `from_connection_string` if `connection_string` is present, and falls through to the managed-identity/IAM-role default. GCP branches follow the same rule: `service_account_info` → `from_service_account_info`, `service_account_file` → `from_service_account_file`, else `from_application_default`. When adding an auth method here, add both the constructor (a `from_*` classmethod, or a `connect_*` function for document) and a routing branch in the factory — for document, in **both** `get_mongodb` and `get_mongodb_sync`.
 
-  AWS `from_assume_role` (STS AssumeRole, cross-account) is wired for **SQS** (`get_queue`) and **S3** (`get_storage` + `get_storage_client`): `role_arn` present → assume-role path, checked **before** `aws_access_key_id`. It does a synchronous `boto3` `sts:AssumeRole` (optional `external_id` → `ExternalId`) and threads the temporary creds into the `aioboto3.Session`. Temp creds are not auto-refreshed — construct a fresh backend when the session expires.
+  AWS `from_assume_role` (STS AssumeRole, cross-account) is wired for **SQS** (`get_queue`) and **S3** (`get_storage` + `get_storage_client`): `role_arn` present → assume-role path, checked **before** `aws_access_key_id`. It does a synchronous `boto3` `sts:AssumeRole` (optional `external_id` → `ExternalId`) and threads the temporary creds into the `aiobotocore` session via `cloudrift.core.aws_session.build_session`. Temp creds are not auto-refreshed — construct a fresh backend when the session expires.
 
 ### Azure credentials — one chain, defined once
 

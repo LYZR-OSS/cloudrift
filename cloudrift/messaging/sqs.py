@@ -1,10 +1,11 @@
 import asyncio
 import json
 
-import aioboto3
+from aiobotocore.session import AioSession
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from cloudrift.core.aws_session import build_session
 from cloudrift.core.exceptions import (
     FeatureNotSupportedError,
     MessageSendError,
@@ -15,7 +16,7 @@ from cloudrift.messaging.base import Message, MessagingBackend
 
 
 class AWSSQSBackend(MessagingBackend):
-    """AWS SQS messaging backend (native async via ``aioboto3``).
+    """AWS SQS messaging backend (native async via ``aiobotocore``).
 
     A single async SQS client is created lazily and reused across operations.
     Call ``await backend.close()`` (or use ``async with backend:``) to release
@@ -31,7 +32,7 @@ class AWSSQSBackend(MessagingBackend):
     def __init__(
         self,
         queue_url: str,
-        session: aioboto3.Session,
+        session: AioSession,
         *,
         endpoint_url: str | None = None,
         dlq_url: str | None = None,
@@ -77,11 +78,11 @@ class AWSSQSBackend(MessagingBackend):
         **kwargs,
     ) -> "AWSSQSBackend":
         """Authenticate with explicit access key / secret (+ optional STS session token)."""
-        session = aioboto3.Session(
+        session = build_session(
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
             aws_session_token=aws_session_token,
-            region_name=region,
+            region=region,
         )
         return cls(queue_url, session, endpoint_url=endpoint_url, **kwargs)
 
@@ -102,20 +103,8 @@ class AWSSQSBackend(MessagingBackend):
         credentials assumed for another service) cannot shadow the long-lived
         instance / ECS task role this client should use.
         """
-        session = cls._build_iam_session(region, exclude_env_credentials)
+        session = build_session(region=region, exclude_env_credentials=exclude_env_credentials)
         return cls(queue_url, session, endpoint_url=endpoint_url, **kwargs)
-
-    @staticmethod
-    def _build_iam_session(region: str, exclude_env_credentials: bool) -> aioboto3.Session:
-        if not exclude_env_credentials:
-            return aioboto3.Session(region_name=region)
-        import aiobotocore.session
-
-        botocore_session = aiobotocore.session.AioSession()
-        # The container/instance-role provider auto-refreshes; dropping "env"
-        # ensures stray process env credentials can't take precedence over it.
-        botocore_session.get_component("credential_provider").remove("env")
-        return aioboto3.Session(botocore_session=botocore_session, region_name=region)
 
     @classmethod
     def from_profile(
@@ -127,7 +116,7 @@ class AWSSQSBackend(MessagingBackend):
         **kwargs,
     ) -> "AWSSQSBackend":
         """Authenticate using a named profile from ``~/.aws/credentials``."""
-        session = aioboto3.Session(profile_name=profile_name, region_name=region)
+        session = build_session(profile_name=profile_name, region=region)
         return cls(queue_url, session, endpoint_url=endpoint_url, **kwargs)
 
     @classmethod
@@ -155,11 +144,11 @@ class AWSSQSBackend(MessagingBackend):
         if external_id:
             params["ExternalId"] = external_id
         creds = sts.assume_role(**params)["Credentials"]
-        session = aioboto3.Session(
+        session = build_session(
             aws_access_key_id=creds["AccessKeyId"],
             aws_secret_access_key=creds["SecretAccessKey"],
             aws_session_token=creds["SessionToken"],
-            region_name=region,
+            region=region,
         )
         return cls(queue_url, session, endpoint_url=endpoint_url, **kwargs)
 
@@ -172,7 +161,7 @@ class AWSSQSBackend(MessagingBackend):
             return self._client
         async with self._lock:
             if self._client is None:
-                self._client_cm = self._session.client(
+                self._client_cm = self._session.create_client(
                     "sqs",
                     endpoint_url=self._endpoint_url,
                     config=self._config,

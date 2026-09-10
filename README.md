@@ -1,8 +1,8 @@
 # cloudrift
 
-Cloud-agnostic abstraction for **storage**, **messaging**, **document databases**, **cache**, **secrets**, **SQL**, **crypto (KMS)**, **pub/sub**, and **email** — built for Lyzr microservices.
+Cloud-agnostic abstraction for **storage**, **messaging**, **document databases**, **cache**, **secrets**, **SQL**, **crypto (KMS)**, **pub/sub**, **email**, and **code sandboxes** — built for Lyzr microservices.
 
-- **Async-first.** Every public method is `async def`, backed by native-async SDK clients (`aioboto3`, `azure.*.aio`, `gcloud-aio-storage`, the Google async GAPIC clients, `motor`, `redis.asyncio`, `aiosmtplib`) — no thread-pool wrapping.
+- **Async-first.** Every public method is `async def`, backed by native-async SDK clients (`aiobotocore`, `azure.*.aio`, `gcloud-aio-storage`, the Google async GAPIC clients, `motor`, `redis.asyncio`, `aiosmtplib`) — no thread-pool wrapping.
 - **Drop-in providers.** Same interface across AWS, Azure, GCP, and self-hosted backends. Swap `s3` ↔ `azure_blob` ↔ `gcs` (or `sqs` ↔ `azure_bus` ↔ `gcp_pubsub`, `documentdb` ↔ `cosmos` ↔ `firestore`, `redis` ↔ `elasticache` ↔ `azure_redis` ↔ `memorystore`, `ses` ↔ `azure_acs` ↔ `smtp`) by changing one string.
 - **Multiple auth methods per provider.** Static keys, IAM roles, profiles, managed identity, service principals, SAS tokens, mTLS, Workload Identity, ADC, IAM auth — pick what your microservice already has.
 
@@ -17,6 +17,7 @@ Cloud-agnostic abstraction for **storage**, **messaging**, **document databases*
 | Crypto (KMS) | KMS | Key Vault keys | Cloud KMS | — |
 | Pub/Sub | SNS | Event Grid | Pub/Sub | — |
 | Email | SES | Communication Services | — (see note) | SMTP |
+| Sandbox | Lambda MicroVMs | Container Apps dynamic sessions | — | E2B |
 
 > **GCP email:** Google Cloud has no transactional email service (no SES/ACS
 > equivalent — the App Engine Mail API is legacy). On GCP, use the `smtp`
@@ -35,6 +36,9 @@ pip install "cloudrift[azure]"        # Blob + Service Bus + Cosmos + ACS Email 
 pip install "cloudrift[gcp]"          # GCS + Pub/Sub + Firestore + Secret Manager + KMS + Redis client
 pip install "cloudrift[cache]"        # Just Redis (any flavour)
 pip install "cloudrift[email]"        # Just raw SMTP (aiosmtplib)
+pip install "cloudrift[sandbox-aws]"    # Lambda MicroVMs sandbox client
+pip install "cloudrift[sandbox-azure]"  # Container Apps dynamic sessions sandbox client
+pip install "cloudrift[sandbox-e2b]"    # E2B sandbox client
 pip install "cloudrift[all]"          # Everything
 ```
 
@@ -647,6 +651,91 @@ through untouched — use exactly what the instance's user list shows. Requires
 `roles/cloudsql.instanceUser`.
 
 ---
+
+## Sandbox
+
+`get_sandbox(provider, **kwargs)` returns a `SandboxBackend`: a session-scoped
+shell (arbitrary bash as root, `pip install`, package-manager installs, `git
+clone`) with a filesystem that survives across calls.
+
+```python
+from cloudrift.sandbox import get_sandbox
+
+# AWS Lambda MicroVMs
+backend = get_sandbox(
+    "lambda_microvm",
+    image_identifier="arn:aws:lambda:us-east-1:123456789012:microvm-image:lyzr-sandbox",
+    image_version="1.0",
+    region="us-east-1",
+)
+
+# Azure Container Apps dynamic sessions
+backend = get_sandbox("aca_sessions", pool_endpoint="https://pool.env-id.eastus.azurecontainerapps.io")
+
+# E2B
+backend = get_sandbox("e2b", api_key="e2b_...")
+```
+
+Capability surface, identical across all three providers:
+
+- `open_session(key)` / `session_alive(session_id)` / `close_session(session_id)`.
+- `exec(session_id, command, timeout_seconds=60)` — runs `command` and
+  normalizes exit-code semantics. Commands at or under 120 seconds run
+  synchronously in the foreground; longer commands (package installs, large
+  clones) are automatically launched detached and polled, because a single
+  request cannot be trusted to survive a multi-minute HTTP proxy through to
+  the guest.
+- Filesystem: `make_dir`, `list_dir`, `rename`, `remove`, `exists`, `is_dir`,
+  `size`, `read_text` / `write_text`, `read_bytes` / `write_bytes`.
+
+### Sandbox image
+
+cloudrift ships **no container images and no cloud provisioning**. The
+`lambda_microvm` and `aca_sessions` backends talk over HTTP to
+`cloudrift_sandbox_server`, a stdlib-only module that ships inside this wheel
+(`pip install lyzr-cloudrift` installs it as a top-level module — it is not
+under the `cloudrift` package, so it needs no extras). You run it inside your
+own guest image; building and deploying that image is the responsibility of
+the service that deploys the sandbox, not of this library. The E2B backend
+needs none of this — E2B provides its own managed sandbox image.
+
+The wire contract `cloudrift_sandbox_server` implements:
+
+- `GET /health` → `200` once the server is ready to accept exec calls.
+- `POST /exec` `{"command": str, "timeout_seconds": int}` →
+  `{"stdout": str, "stderr": str, "exit_code": int}`.
+- Application port: `8080`. Working directory: `/workspace`.
+- Exit code `124` on timeout. Captured `stdout`/`stderr` each tail-truncated
+  to 1 MiB.
+- AWS Lambda MicroVM lifecycle hooks (Azure never calls these) on port `9000`
+  under `/aws/lambda-microvms/runtime/v1/{ready,validate,run,resume,suspend,terminate}`.
+
+Run it as `python3 -m cloudrift_sandbox_server`. Reference Dockerfiles for
+both providers (the image build itself belongs to the deploying service, not
+to this library):
+
+```dockerfile
+# AWS Lambda MicroVMs
+FROM public.ecr.aws/lambda/microvms:al2023-minimal
+RUN dnf install -y python3 python3-pip git tar gzip unzip procps-ng findutils which gcc make \
+    && dnf clean all
+RUN pip3 install --no-deps --no-cache-dir lyzr-cloudrift==0.5.0
+WORKDIR /workspace
+EXPOSE 8080 9000
+CMD ["python3", "-u", "-m", "cloudrift_sandbox_server"]
+```
+
+```dockerfile
+# Azure Container Apps custom-container session pool
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash git curl wget ca-certificates procps coreutils unzip build-essential \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-deps --no-cache-dir lyzr-cloudrift==0.5.0
+WORKDIR /workspace
+EXPOSE 8080
+CMD ["python", "-u", "-m", "cloudrift_sandbox_server"]
+```
 
 ## Connection pooling & lifecycle
 

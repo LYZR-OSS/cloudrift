@@ -1,9 +1,10 @@
 import asyncio
 
-import aioboto3
+from aiobotocore.session import AioSession
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from cloudrift.core.aws_session import build_session
 from cloudrift.core.exceptions import ObjectNotFoundError, StorageError, StoragePermissionError
 from cloudrift.storage.base import StorageBackend
 
@@ -11,7 +12,7 @@ from cloudrift.storage.base import StorageBackend
 class AWSS3Client:
     """Account-scoped AWS S3 client.
 
-    Owns one ``aioboto3`` session and one async S3 client (lazily created on
+    Owns one ``aiobotocore`` session and one async S3 client (lazily created on
     first use). The same client serves every bucket in the account, so
     callers using multiple buckets share a single connection pool.
 
@@ -29,7 +30,7 @@ class AWSS3Client:
 
     def __init__(
         self,
-        session: aioboto3.Session,
+        session: AioSession,
         *,
         endpoint_url: str | None = None,
         max_pool_connections: int = 50,
@@ -64,11 +65,11 @@ class AWSS3Client:
         **kwargs,
     ) -> "AWSS3Client":
         """Authenticate with explicit access key / secret (+ optional STS session token)."""
-        session = aioboto3.Session(
+        session = build_session(
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
             aws_session_token=aws_session_token,
-            region_name=region,
+            region=region,
         )
         return cls(session, endpoint_url=endpoint_url, **kwargs)
 
@@ -80,7 +81,7 @@ class AWSS3Client:
         **kwargs,
     ) -> "AWSS3Client":
         """Authenticate via IAM role / instance profile / environment variables."""
-        session = aioboto3.Session(region_name=region)
+        session = build_session(region=region)
         return cls(session, endpoint_url=endpoint_url, **kwargs)
 
     @classmethod
@@ -92,7 +93,7 @@ class AWSS3Client:
         **kwargs,
     ) -> "AWSS3Client":
         """Authenticate using a named profile from ``~/.aws/credentials``."""
-        session = aioboto3.Session(profile_name=profile_name, region_name=region)
+        session = build_session(profile_name=profile_name, region=region)
         return cls(session, endpoint_url=endpoint_url, **kwargs)
 
     @classmethod
@@ -119,11 +120,11 @@ class AWSS3Client:
         if external_id:
             params["ExternalId"] = external_id
         creds = sts.assume_role(**params)["Credentials"]
-        session = aioboto3.Session(
+        session = build_session(
             aws_access_key_id=creds["AccessKeyId"],
             aws_secret_access_key=creds["SecretAccessKey"],
             aws_session_token=creds["SessionToken"],
-            region_name=region,
+            region=region,
         )
         return cls(session, endpoint_url=endpoint_url, **kwargs)
 
@@ -148,7 +149,7 @@ class AWSS3Client:
             return self._client
         async with self._lock:
             if self._client is None:
-                self._client_cm = self._session.client(
+                self._client_cm = self._session.create_client(
                     "s3",
                     endpoint_url=self._endpoint_url,
                     config=self._config,
