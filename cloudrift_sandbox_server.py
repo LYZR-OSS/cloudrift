@@ -1,14 +1,24 @@
-"""Standard-library-only exec server for the cloudrift sandbox image.
+"""Guest-side half of the ``cloudrift.sandbox`` wire protocol.
 
-Answers a two-endpoint contract that both new sandbox backends (AWS Lambda
+This module ships inside the ``lyzr-cloudrift`` wheel so the client
+(``cloudrift.sandbox``) and the server it talks to inside a sandbox guest
+always version together. It is deliberately dependency-free and deliberately
+kept outside the ``cloudrift`` package so the guest image needs no extras
+beyond the wheel itself (see ``import cloudrift`` note below). The canonical
+way to run it is ``python3 -m cloudrift_sandbox_server``.
+
+Answers a two-endpoint contract that both sandbox backends (AWS Lambda
 MicroVMs and Azure Container Apps dynamic sessions) forward HTTPS into:
 
 - Port 8080 (application): ``GET /health``, ``POST /exec``.
 - Port 9000 (Lambda MicroVM lifecycle hooks; Azure never calls this port):
   ``POST /aws/lambda-microvms/runtime/v1/{ready,validate,run,resume,suspend,terminate}``.
 
-No third-party dependencies: this image ships nothing that could drift or
-need patching independent of the base OS packages baked into the Dockerfile.
+No third-party dependencies: this module ships nothing that could drift or
+need patching independent of the base OS packages baked into the guest
+image. It must never import ``cloudrift`` — that package's ``__init__.py``
+eagerly imports every category, two of which pull in ``redis``, ``motor``,
+and ``pymongo`` at import time, none of which the guest needs.
 """
 
 import http.client
@@ -17,8 +27,12 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import subprocess
 
-MAX_OUTPUT_BYTES = 1024 * 1024  # 1 MiB
+EXEC_PORT = 8080
+LIFECYCLE_PORT = 9000
 WORKDIR = "/workspace"
+MAX_OUTPUT_BYTES = 1024 * 1024  # 1 MiB
+TIMEOUT_EXIT_CODE = 124
+HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1/"
 _HOOKS = frozenset({"ready", "validate", "run", "resume", "suspend", "terminate"})
 
 # Set once the 8080 application listener is bound, so /ready never reports
@@ -38,7 +52,7 @@ def _run_exec(command: str, timeout_seconds: float) -> dict:
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or b""
         stderr = exc.stderr or b""
-        exit_code = 124
+        exit_code = TIMEOUT_EXIT_CODE
     return {
         "stdout": stdout[-MAX_OUTPUT_BYTES:].decode("utf-8", "replace"),
         "stderr": stderr[-MAX_OUTPUT_BYTES:].decode("utf-8", "replace"),
@@ -85,7 +99,7 @@ class _AppHandler(BaseHTTPRequestHandler):
 class _LifecycleHandler(BaseHTTPRequestHandler):
     server_version = "cloudrift-sandbox-lifecycle/1.0"
 
-    _PREFIX = "/aws/lambda-microvms/runtime/v1/"
+    _PREFIX = HOOK_PREFIX
 
     def do_POST(self) -> None:
         if not self.path.startswith(self._PREFIX):
@@ -105,7 +119,7 @@ class _LifecycleHandler(BaseHTTPRequestHandler):
         self._empty(200)
 
     def _probe_exec(self) -> bool:
-        conn = http.client.HTTPConnection("127.0.0.1", 8080, timeout=10)
+        conn = http.client.HTTPConnection("127.0.0.1", EXEC_PORT, timeout=10)
         try:
             body = json.dumps({"command": "true", "timeout_seconds": 10}).encode("utf-8")
             conn.request("POST", "/exec", body=body, headers={"Content-Type": "application/json"})
@@ -129,13 +143,13 @@ class _LifecycleHandler(BaseHTTPRequestHandler):
 def main() -> None:
     # Both servers bind 0.0.0.0: Lambda calls hooks across the network
     # namespace, so a localhost-only listener would be unreachable.
-    app_server = ThreadingHTTPServer(("0.0.0.0", 8080), _AppHandler)
+    app_server = ThreadingHTTPServer(("0.0.0.0", EXEC_PORT), _AppHandler)
     _ready.set()  # TCPServer.__init__ already bound + listened above.
 
     app_thread = threading.Thread(target=app_server.serve_forever, daemon=True)
     app_thread.start()
 
-    lifecycle_server = ThreadingHTTPServer(("0.0.0.0", 9000), _LifecycleHandler)
+    lifecycle_server = ThreadingHTTPServer(("0.0.0.0", LIFECYCLE_PORT), _LifecycleHandler)
     lifecycle_server.serve_forever()
 
 

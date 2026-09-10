@@ -15,6 +15,9 @@ from cloudrift.core.exceptions import (
 from cloudrift.sandbox.base import (
     DEFAULT_READ_CHUNK_BYTES,
     DEFAULT_WRITE_CHUNK_B64,
+    SANDBOX_EXEC_PATH,
+    SANDBOX_EXEC_PORT,
+    SANDBOX_HEALTH_PATH,
     ExecResult,
     SandboxBackend,
 )
@@ -213,9 +216,9 @@ class AWSMicroVMSandboxBackend(SandboxBackend):
         while time.monotonic() < deadline:
             try:
                 token = await self._token(microvm_id)
-                headers = {"X-aws-proxy-auth": token, "X-aws-proxy-port": "8080"}
+                headers = {"X-aws-proxy-auth": token, "X-aws-proxy-port": str(SANDBOX_EXEC_PORT)}
                 async with http.get(
-                    f"{endpoint}/health", headers=headers, timeout=aiohttp.ClientTimeout(total=5)
+                    f"{endpoint}{SANDBOX_HEALTH_PATH}", headers=headers, timeout=aiohttp.ClientTimeout(total=5)
                 ) as resp_health:
                     if resp_health.status == 200:
                         return microvm_id
@@ -287,7 +290,7 @@ class AWSMicroVMSandboxBackend(SandboxBackend):
             resp = await client.create_microvm_auth_token(
                 microvmIdentifier=session_id,
                 expirationInMinutes=_TOKEN_TTL_MINUTES,
-                allowedPorts=[{"port": 8080}],
+                allowedPorts=[{"port": SANDBOX_EXEC_PORT}],
             )
         except ClientError as exc:
             self._raise(exc, session_id)
@@ -304,10 +307,10 @@ class AWSMicroVMSandboxBackend(SandboxBackend):
         retried_transient = False
         while True:
             token = await self._token(session_id, force_refresh=retried_auth)
-            headers = {"X-aws-proxy-auth": token, "X-aws-proxy-port": "8080"}
+            headers = {"X-aws-proxy-auth": token, "X-aws-proxy-port": str(SANDBOX_EXEC_PORT)}
             try:
                 async with http.post(
-                    f"{endpoint}/exec",
+                    f"{endpoint}{SANDBOX_EXEC_PATH}",
                     json=body,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=timeout_seconds + 60),

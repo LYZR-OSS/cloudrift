@@ -23,6 +23,15 @@ MAX_CAPTURED_OUTPUT_BYTES = 1_048_576
 _RC_MARKER = "__CRSB_RC__"
 _JOB_ROOT = "/tmp/.crsb"
 
+# The guest-side implementation of this contract ships in the same wheel as
+# `cloudrift_sandbox_server`; tests/test_sandbox_server.py asserts the two
+# sides agree.
+SANDBOX_EXEC_PORT = 8080
+SANDBOX_EXEC_PATH = "/exec"
+SANDBOX_HEALTH_PATH = "/health"
+SANDBOX_WORKDIR = "/workspace"
+TIMEOUT_EXIT_CODE = 124
+
 
 @dataclass(frozen=True)
 class ExecResult:
@@ -170,7 +179,7 @@ class SandboxBackend(ABC):
                 f"sleep 2; kill -KILL -$(cat {shlex.quote(job)}/pid) 2>/dev/null",
                 30,
             )
-            exit_code = 124
+            exit_code = TIMEOUT_EXIT_CODE
 
         out_result = await self._exec_raw(
             session_id, f"tail -c {MAX_CAPTURED_OUTPUT_BYTES} -- {shlex.quote(job)}/out 2>/dev/null", 30

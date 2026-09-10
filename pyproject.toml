@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "lyzr-cloudrift"
 version = "0.5.0"
-description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, SQL, crypto (KMS), pub/sub, and email across AWS, Azure, and GCP"
+description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, SQL, crypto (KMS), pub/sub, email, and code sandboxes across AWS, Azure, and GCP"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -13,7 +13,8 @@ keywords = [
     "cloud", "aws", "azure", "gcp", "s3", "blob", "gcs", "sqs", "servicebus",
     "documentdb", "cosmosdb", "firestore", "redis", "elasticache", "memorystore",
     "cache", "secrets", "keyvault", "secret-manager", "sns", "eventgrid",
-    "pubsub", "kms", "email", "ses", "smtp",
+    "pubsub", "kms", "email", "ses", "smtp", "sandbox", "code-execution",
+    "microvm", "e2b",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -170,7 +171,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["cloudrift"]
+only-include = ["cloudrift", "cloudrift_sandbox_server.py"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -12,6 +12,7 @@ from cloudrift.core.exceptions import (
 from cloudrift.sandbox.base import (
     DEFAULT_READ_CHUNK_BYTES,
     DEFAULT_WRITE_CHUNK_B64,
+    SANDBOX_EXEC_PATH,
     ExecResult,
     SandboxBackend,
 )
@@ -40,7 +41,7 @@ class AzureACASessionsBackend(SandboxBackend):
         credential,
         *,
         api_version: str = "2025-02-02-preview",
-        exec_path: str = "/exec",
+        exec_path: str = SANDBOX_EXEC_PATH,
         read_chunk_bytes: int = DEFAULT_READ_CHUNK_BYTES,
         write_chunk_b64: int = DEFAULT_WRITE_CHUNK_B64,
     ) -> None:
