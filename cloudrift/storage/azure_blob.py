@@ -271,7 +271,14 @@ class AzureBlobBackend(StorageBackend):
             self._raise(e, prefix)
 
     async def presigned_url(self, key: str, expires_in: int = 3600) -> str:
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        now = datetime.now(timezone.utc)
+        # Backdate the signed start 15 min to tolerate clock skew between the
+        # signer and the storage service. It is also required in its own right:
+        # some accounts enforce a SAS policy that rejects a token carrying no
+        # signed start time ("AuthenticationFailed: Policy violated by no signed
+        # start."), so every branch must pass ``start=`` to generate_blob_sas.
+        start = now - timedelta(minutes=15)
+        expiry = now + timedelta(seconds=expires_in)
         permission = BlobSasPermissions(read=True)
         try:
             if self._account_key:
@@ -281,6 +288,7 @@ class AzureBlobBackend(StorageBackend):
                     blob_name=key,
                     account_key=self._account_key,
                     permission=permission,
+                    start=start,
                     expiry=expiry,
                 )
             elif self._credential is not None:
@@ -291,7 +299,6 @@ class AzureBlobBackend(StorageBackend):
                 # Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey
                 # (e.g. Storage Blob Data Contributor/Owner) — the same role
                 # already required for blob read/write under managed identity.
-                start = datetime.now(timezone.utc) - timedelta(minutes=15)
                 delegation_key = await self._service.get_user_delegation_key(start, expiry)
                 sas = generate_blob_sas(
                     account_name=self._service.account_name,
@@ -299,6 +306,7 @@ class AzureBlobBackend(StorageBackend):
                     blob_name=key,
                     user_delegation_key=delegation_key,
                     permission=permission,
+                    start=start,
                     expiry=expiry,
                 )
             else:
