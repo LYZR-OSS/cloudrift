@@ -1474,7 +1474,7 @@ wheels = [
 
 [[package]]
 name = "lyzr-cloudrift"
-version = "0.3.0"
+version = "0.4.1"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1519,6 +1519,7 @@ azure = [
     { name = "azure-keyvault-secrets" },
     { name = "azure-servicebus" },
     { name = "azure-storage-blob" },
+    { name = "cryptography" },
     { name = "motor" },
     { name = "pymongo" },
     { name = "redis", extra = ["hiredis"] },
@@ -1534,6 +1535,7 @@ dev = [
     { name = "azure-keyvault-keys" },
     { name = "azure-servicebus" },
     { name = "azure-storage-blob" },
+    { name = "cryptography" },
     { name = "fakeredis" },
     { name = "gcloud-aio-storage" },
     { name = "google-auth" },
@@ -1632,6 +1634,8 @@ requires-dist = [
     { name = "azure-storage-blob", marker = "extra == 'azure'", specifier = ">=12.19.0" },
     { name = "azure-storage-blob", marker = "extra == 'dev'", specifier = ">=12.19.0" },
     { name = "cryptography", marker = "extra == 'all'", specifier = ">=50.0.1" },
+    { name = "cryptography", marker = "extra == 'azure'", specifier = ">=50.0.1" },
+    { name = "cryptography", marker = "extra == 'dev'", specifier = ">=50.0.1" },
     { name = "cryptography", marker = "extra == 'sql'", specifier = ">=50.0.1" },
     { name = "cryptography", marker = "extra == 'sql-mssql'", specifier = ">=50.0.1" },
     { name = "databricks-sql-connector", marker = "extra == 'all'", specifier = ">=3.0" },

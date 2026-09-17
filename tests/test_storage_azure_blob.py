@@ -44,6 +44,11 @@ async def test_presigned_url_signs_with_account_key_when_present():
     assert mock_sas.call_args.kwargs["account_key"] == "dGhla2V5"
     assert "user_delegation_key" not in mock_sas.call_args.kwargs
     backend._service.get_user_delegation_key.assert_not_awaited()
+    # A signed start (st) must be present, else accounts that enforce a SAS
+    # policy reject it with "Policy violated by no signed start."
+    kw = mock_sas.call_args.kwargs
+    assert isinstance(kw["start"], datetime)
+    assert kw["start"] < kw["expiry"]
 
 
 async def test_presigned_url_falls_back_to_user_delegation_key_for_aad_auth():
@@ -64,6 +69,11 @@ async def test_presigned_url_falls_back_to_user_delegation_key_for_aad_auth():
     assert expiry - start >= timedelta(minutes=15)
     assert mock_sas.call_args.kwargs["user_delegation_key"] == "fake-delegation-key"
     assert "account_key" not in mock_sas.call_args.kwargs or mock_sas.call_args.kwargs["account_key"] is None
+    # The SAS itself must carry a signed start (st) matching the delegation-key
+    # window — without it, accounts enforcing a SAS policy reject the token with
+    # "Policy violated by no signed start."
+    assert mock_sas.call_args.kwargs["start"] == start
+    assert mock_sas.call_args.kwargs["expiry"] == expiry
 
 
 async def test_presigned_url_raises_without_any_credential():
