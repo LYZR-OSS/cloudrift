@@ -5,8 +5,8 @@ def get_sandbox(provider: str, **kwargs) -> SandboxBackend:
     """Factory to instantiate a sandbox backend.
 
     Args:
-        provider: ``"lambda_microvm"`` (AWS Lambda MicroVMs), ``"aca_sessions"``
-            (Azure Container Apps custom container session pool), or ``"e2b"``.
+        provider: ``"lambda_microvm"`` (AWS Lambda MicroVMs), ``"aca_sandbox"``
+            (Azure Container Apps Sandboxes), or ``"e2b"``.
         **kwargs: Provider-specific config. For ``lambda_microvm`` the factory
             routes to the appropriate ``from_*`` classmethod based on which
             credential keys are present.
@@ -15,7 +15,8 @@ def get_sandbox(provider: str, **kwargs) -> SandboxBackend:
         get_sandbox("lambda_microvm",
                     image_identifier="arn:aws:lambda:us-east-1:123456789012:microvm-image:lyzr-sandbox",
                     image_version="1.0", region="us-east-1")
-        get_sandbox("aca_sessions", pool_endpoint="https://pool.env-id.eastus.azurecontainerapps.io")
+        get_sandbox("aca_sandbox", subscription_id="...", resource_group="...",
+                    sandbox_group="...", region="eastus2")
         get_sandbox("e2b", api_key="e2b_...")
     """
     if provider == "lambda_microvm":
@@ -27,10 +28,10 @@ def get_sandbox(provider: str, **kwargs) -> SandboxBackend:
             return AWSMicroVMSandboxBackend.from_profile(**kwargs)
         return AWSMicroVMSandboxBackend.from_iam_role(**kwargs)
 
-    if provider == "aca_sessions":
-        from cloudrift.sandbox.azure_aca import AzureACASessionsBackend
+    if provider == "aca_sandbox":
+        from cloudrift.sandbox.azure_sandbox import AzureSandboxesBackend
 
-        return AzureACASessionsBackend.from_managed_identity(**kwargs)
+        return AzureSandboxesBackend.from_managed_identity(**kwargs)
 
     if provider == "e2b":
         from cloudrift.sandbox.e2b import E2BSandboxBackend
@@ -38,7 +39,7 @@ def get_sandbox(provider: str, **kwargs) -> SandboxBackend:
         return E2BSandboxBackend.from_api_key(**kwargs)
 
     raise ValueError(
-        f"Unknown sandbox provider: {provider!r}. Choose 'lambda_microvm', 'aca_sessions', or 'e2b'."
+        f"Unknown sandbox provider: {provider!r}. Choose 'lambda_microvm', 'aca_sandbox', or 'e2b'."
     )
 
 
