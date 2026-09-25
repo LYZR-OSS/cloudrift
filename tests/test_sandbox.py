@@ -1,10 +1,8 @@
 """Unit tests for the `sandbox` category.
 
-No real cloud calls: AWS Lambda MicroVMs and Azure ACA are exercised through
-mocked SDK clients / aiohttp sessions, E2B through a stubbed `AsyncSandbox`,
-and the shared exec/filesystem layer in `cloudrift.sandbox.base` through a
-`_FakeShellBackend` that interprets the specific command shapes that layer
-generates against an in-memory filesystem.
+No real cloud calls: AWS Lambda MicroVMs use mocked SDK clients / aiohttp
+sessions, E2B uses a stubbed ``AsyncSandbox``, and the shared exec/filesystem
+layer in ``cloudrift.sandbox.base`` uses an in-memory shell backend.
 """
 
 import base64
@@ -24,7 +22,6 @@ from cloudrift.core.exceptions import (
 )
 from cloudrift.sandbox import get_sandbox
 from cloudrift.sandbox.aws_microvm import AWSMicroVMSandboxBackend
-from cloudrift.sandbox.azure_aca import AzureACASessionsBackend
 from cloudrift.sandbox.base import (
     _JOB_ROOT,
     MAX_TRANSFER_BYTES,
@@ -58,6 +55,9 @@ class _RawStubBackend(SandboxBackend):
     async def session_alive(self, session_id):
         return True
 
+    async def resume_session(self, session_id, *, timeout_seconds=300):
+        return True
+
     async def close_session(self, session_id):
         pass
 
@@ -89,6 +89,9 @@ class _FakeShellBackend(SandboxBackend):
         return "fake-session"
 
     async def session_alive(self, session_id):
+        return True
+
+    async def resume_session(self, session_id, *, timeout_seconds=300):
         return True
 
     async def close_session(self, session_id):
@@ -510,111 +513,6 @@ async def test_terminate_microvm_not_found_is_swallowed():
     backend._ensure = AsyncMock(return_value=fake_client)
 
     await backend.close_session("mv-x")  # must not raise
-
-
-# ---------------------------------------------------------------------------
-# 4. Azure Container Apps dynamic sessions
-# ---------------------------------------------------------------------------
-
-
-def _aca_backend(**overrides):
-    credential = MagicMock(name="credential")
-    credential.get_token = AsyncMock(
-        return_value=SimpleNamespace(token="tok", expires_on=time.time() + 3600)
-    )
-    backend = AzureACASessionsBackend(
-        "https://pool.env.eastus.azurecontainerapps.io", credential, **overrides
-    )
-    return backend, credential
-
-
-async def test_open_session_no_network_call_returns_hex_identifier():
-    backend, credential = _aca_backend()
-    session_id = await backend.open_session("apikey:sessionid")
-    assert len(session_id) == 64
-    assert all(c in "0123456789abcdef" for c in session_id)
-    credential.get_token.assert_not_awaited()
-
-
-def test_from_managed_identity_builds_credential():
-    fake_credential = MagicMock(name="fake-credential")
-    with patch(
-        "cloudrift.core.azure_credentials.build_async_credential", return_value=fake_credential
-    ) as mock_build:
-        backend = AzureACASessionsBackend.from_managed_identity(
-            "https://pool.env.eastus.azurecontainerapps.io", client_id="cid"
-        )
-    mock_build.assert_called_once_with("cid")
-    assert backend._credential is fake_credential
-
-
-async def test_exec_raw_posts_to_pool_endpoint_with_identifier_query():
-    backend, _ = _aca_backend()
-    fake_http = MagicMock()
-    fake_http.post = MagicMock(
-        return_value=_FakeAsyncCM(
-            _FakeResponse(200, json_body={"stdout": "hi", "stderr": "", "exit_code": 0})
-        )
-    )
-    backend._http = fake_http
-
-    result = await backend._exec_raw("sess-1", "echo hi", 30)
-
-    assert result == ExecResult("hi", "", 0)
-    call = fake_http.post.call_args
-    assert call.args[0] == "https://pool.env.eastus.azurecontainerapps.io/exec"
-    assert call.kwargs["params"] == {"identifier": "sess-1"}
-    assert call.kwargs["headers"]["Authorization"] == "Bearer tok"
-
-
-async def test_session_alive_maps_400_not_found_body_to_false():
-    backend, _ = _aca_backend()
-    fake_http = MagicMock()
-    fake_http.post = MagicMock(
-        return_value=_FakeAsyncCM(
-            _FakeResponse(400, text_body='{"error":"SessionWithIdentifierNotFound"}')
-        )
-    )
-    backend._http = fake_http
-    assert await backend.session_alive("sess-1") is False
-
-
-async def test_session_alive_true_on_200():
-    backend, _ = _aca_backend()
-    fake_http = MagicMock()
-    fake_http.post = MagicMock(return_value=_FakeAsyncCM(_FakeResponse(200)))
-    backend._http = fake_http
-    assert await backend.session_alive("sess-1") is True
-
-
-async def test_close_session_posts_to_stop_session():
-    backend, _ = _aca_backend()
-    fake_http = MagicMock()
-    fake_http.post = MagicMock(return_value=_FakeAsyncCM(_FakeResponse(200)))
-    backend._http = fake_http
-
-    await backend.close_session("sess-1")
-
-    call = fake_http.post.call_args
-    assert call.args[0].endswith("/.management/stopSession")
-
-
-async def test_exec_raw_403_raises_permission_error():
-    backend, _ = _aca_backend()
-    fake_http = MagicMock()
-    fake_http.post = MagicMock(return_value=_FakeAsyncCM(_FakeResponse(403)))
-    backend._http = fake_http
-    with pytest.raises(SandboxPermissionError):
-        await backend._exec_raw("sess-1", "echo hi", 30)
-
-
-async def test_exec_raw_500_raises_sandbox_error():
-    backend, _ = _aca_backend()
-    fake_http = MagicMock()
-    fake_http.post = MagicMock(return_value=_FakeAsyncCM(_FakeResponse(500, text_body="boom")))
-    backend._http = fake_http
-    with pytest.raises(SandboxError):
-        await backend._exec_raw("sess-1", "echo hi", 30)
 
 
 # ---------------------------------------------------------------------------

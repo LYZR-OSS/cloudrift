@@ -5,6 +5,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 
 from cloudrift.core.exceptions import SandboxError, SandboxTransferError
 
@@ -45,19 +46,24 @@ class FileEntry:
     name: str
     type: str  # "file" | "dir"
 
+@dataclass(frozen=True)
+class SandboxSessionInfo:
+    """Provider session metadata for scoped orphan cleanup."""
+
+    session_id: str
+    created_at: datetime
+    metadata: dict[str, str]
+
 
 class SandboxBackend(ABC):
     """Abstract base class for cloud sandbox (code execution) backends.
 
     A sandbox backend gives a caller a session-scoped shell: arbitrary bash as
     root, ``pip install``, package-manager installs, ``git clone``, and a
-    filesystem that survives across calls. Concrete backends (AWS Lambda
-    MicroVMs, Azure Container Apps dynamic sessions, E2B) implement exactly
-    four methods — :meth:`open_session`, :meth:`session_alive`,
-    :meth:`close_session`, and ``_exec_raw`` — everything else (every
-    filesystem operation and the long-running-command protocol) is
-    implemented once here, on top of those four, so the providers cannot
-    drift on filesystem or timeout semantics.
+    filesystem that survives across calls. Concrete backends implement
+    :meth:`open_session`, :meth:`session_alive`, :meth:`resume_session`,
+    :meth:`close_session`, and ``_exec_raw``; shared filesystem operations
+    and long-running command handling live here.
 
     Backends hold long-lived async clients. Use ``await backend.close()`` (or
     ``async with backend:``) to release them cleanly.
@@ -85,8 +91,19 @@ class SandboxBackend(ABC):
 
     @abstractmethod
     async def session_alive(self, session_id: str) -> bool:
-        """True if the session can still accept commands (including a suspended
-        session that the provider resumes on the next request)."""
+        """Query whether a session exists without waking or extending it.
+
+        Return False only for an authoritative missing/expired session;
+        permission, network, and other uncertain failures must raise.
+        """
+
+    @abstractmethod
+    async def resume_session(
+        self, session_id: str, *, timeout_seconds: int = 300
+    ) -> bool:
+        """Ensure the existing session is ready for commands, resuming it if
+        suspended. Return False only when definitely missing or expired;
+        never allocate a replacement session here."""
 
     @abstractmethod
     async def close_session(self, session_id: str) -> None:
@@ -303,8 +320,12 @@ class SandboxBackend(ABC):
             )
 
     async def touch(self, session_id: str, *, timeout_seconds: int = 3600) -> None:
-        """Extend session lifetime. Default is a no-op: Lambda MicroVMs and ACA
-        both treat endpoint traffic as activity; only E2B needs an explicit call."""
+        """Renew a running session's idle lease when the provider supports it.
+
+        MicroVM endpoint traffic itself resets its native idle timer, while
+        E2B requires an explicit timeout update. This cannot extend an AWS
+        MicroVM's absolute maximum duration.
+        """
 
     async def close(self) -> None:
         """Close the underlying client and release sockets. Default is a no-op."""

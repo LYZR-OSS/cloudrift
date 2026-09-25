@@ -669,8 +669,14 @@ backend = get_sandbox(
     region="us-east-1",
 )
 
-# Azure Container Apps dynamic sessions
-backend = get_sandbox("aca_sessions", pool_endpoint="https://pool.env-id.eastus.azurecontainerapps.io")
+# Azure Container Apps Sandboxes (pre-provisioned sandbox group, managed identity)
+backend = get_sandbox(
+    "aca_sandbox",
+    subscription_id="...",
+    resource_group="...",
+    sandbox_group="...",
+    region="eastus2",
+)
 
 # E2B
 backend = get_sandbox("e2b", api_key="e2b_...")
@@ -678,7 +684,14 @@ backend = get_sandbox("e2b", api_key="e2b_...")
 
 Capability surface, identical across all three providers:
 
-- `open_session(key)` / `session_alive(session_id)` / `close_session(session_id)`.
+- `open_session(key)` / `session_alive(session_id)` / `resume_session(session_id)` /
+  `close_session(session_id)`. `session_alive` never wakes a session;
+  `resume_session` wakes the same session (never a replacement) and returns
+  `False` only when it is authoritatively gone.
+- Standby: sessions suspend after 5 idle minutes and resume with their
+  filesystem. AWS MicroVMs are bounded by an 8-hour absolute lifetime; Azure
+  sandboxes are auto-deleted 30 days after stopping; paused E2B sandboxes
+  persist until closed (use `list_sessions()` for scoped cleanup).
 - `exec(session_id, command, timeout_seconds=60)` — runs `command` and
   normalizes exit-code semantics. Commands at or under 120 seconds run
   synchronously in the foreground; longer commands (package installs, large
@@ -691,13 +704,14 @@ Capability surface, identical across all three providers:
 ### Sandbox image
 
 cloudrift ships **no container images and no cloud provisioning**. The
-`lambda_microvm` and `aca_sessions` backends talk over HTTP to
+`lambda_microvm` backend talks over HTTP to
 `cloudrift_sandbox_server`, a stdlib-only module that ships inside this wheel
 (`pip install lyzr-cloudrift` installs it as a top-level module — it is not
 under the `cloudrift` package, so it needs no extras). You run it inside your
 own guest image; building and deploying that image is the responsibility of
-the service that deploys the sandbox, not of this library. The E2B backend
-needs none of this — E2B provides its own managed sandbox image.
+the service that deploys the sandbox, not of this library. The E2B and
+`aca_sandbox` backends need none of this — they use provider-managed images
+and the provider SDK's exec API.
 
 The wire contract `cloudrift_sandbox_server` implements:
 
@@ -707,34 +721,21 @@ The wire contract `cloudrift_sandbox_server` implements:
 - Application port: `8080`. Working directory: `/workspace`.
 - Exit code `124` on timeout. Captured `stdout`/`stderr` each tail-truncated
   to 1 MiB.
-- AWS Lambda MicroVM lifecycle hooks (Azure never calls these) on port `9000`
+- AWS Lambda MicroVM lifecycle hooks on port `9000`
   under `/aws/lambda-microvms/runtime/v1/{ready,validate,run,resume,suspend,terminate}`.
 
-Run it as `python3 -m cloudrift_sandbox_server`. Reference Dockerfiles for
-both providers (the image build itself belongs to the deploying service, not
-to this library):
+Run it as `python3 -m cloudrift_sandbox_server`. Reference Dockerfile (the
+image build itself belongs to the deploying service, not to this library):
 
 ```dockerfile
 # AWS Lambda MicroVMs
 FROM public.ecr.aws/lambda/microvms:al2023-minimal
 RUN dnf install -y python3 python3-pip git tar gzip unzip procps-ng findutils which gcc make \
     && dnf clean all
-RUN pip3 install --no-deps --no-cache-dir lyzr-cloudrift==0.5.0
+RUN pip3 install --no-deps --no-cache-dir lyzr-cloudrift==0.6.0
 WORKDIR /workspace
 EXPOSE 8080 9000
 CMD ["python3", "-u", "-m", "cloudrift_sandbox_server"]
-```
-
-```dockerfile
-# Azure Container Apps custom-container session pool
-FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash git curl wget ca-certificates procps coreutils unzip build-essential \
-    && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-deps --no-cache-dir lyzr-cloudrift==0.5.0
-WORKDIR /workspace
-EXPOSE 8080
-CMD ["python", "-u", "-m", "cloudrift_sandbox_server"]
 ```
 
 ## Connection pooling & lifecycle
