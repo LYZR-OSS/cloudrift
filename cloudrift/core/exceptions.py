@@ -123,3 +123,20 @@ class SenderUnverifiedError(EmailError):
 
 class EmailThrottledError(EmailError):
     """Raised when the provider rate-limits the send."""
+
+
+# Sandbox exceptions
+class SandboxError(CloudRiftError):
+    """Base exception for sandbox operations."""
+
+
+class SandboxSessionNotFoundError(SandboxError):
+    """Raised when the referenced sandbox session does not exist or has expired."""
+
+
+class SandboxPermissionError(SandboxError):
+    """Raised on sandbox access permission failures."""
+
+
+class SandboxTransferError(SandboxError):
+    """Raised when a file transfer in or out of a sandbox is incomplete or corrupt."""

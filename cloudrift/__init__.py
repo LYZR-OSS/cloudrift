@@ -9,6 +9,7 @@ from cloudrift.sql import get_sql
 from cloudrift.crypto import get_crypto
 from cloudrift.pubsub import get_pubsub
 from cloudrift.email import get_email
+from cloudrift.sandbox import get_sandbox
 
 try:
     __version__ = version("lyzr-cloudrift")
@@ -26,4 +27,5 @@ __all__ = [
     "get_crypto",
     "get_pubsub",
     "get_email",
+    "get_sandbox",
 ]

@@ -34,12 +34,14 @@ htmlcov/
 coverage.xml
 
 # Local-only dev / smoke-test scripts (kept out of source control), except the
-# GCP provisioning/teardown toolkit: the README documents it as the way to run
-# tests/integration, so leaving it untracked makes those instructions dangle.
+# GCP provisioning/teardown toolkit and the sandbox real-cloud smoke test:
+# these are documented as the way to run tests/integration, so leaving them
+# untracked makes those instructions dangle.
 # (scripts/* not scripts/ — git cannot re-include a file whose parent directory
 # is itself excluded, so the negation below only works against the contents.)
 scripts/*
 !scripts/gcp_*
+!scripts/sandbox_smoke.py
 
 # Editor / IDE
 .vscode/

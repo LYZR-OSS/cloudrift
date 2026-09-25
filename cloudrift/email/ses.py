@@ -1,10 +1,11 @@
 import asyncio
 from email.message import EmailMessage as MIMEEmailMessage
 
-import aioboto3
+from aiobotocore.session import AioSession
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from cloudrift.core.aws_session import build_session
 from cloudrift.core.exceptions import (
     EmailError,
     EmailSendError,
@@ -16,7 +17,7 @@ from cloudrift.email.base import Attachment, EmailBackend, _as_list
 
 
 class AWSSESBackend(EmailBackend):
-    """AWS SES email backend (native async via ``aioboto3``, SESv2 API).
+    """AWS SES email backend (native async via ``aiobotocore``, SESv2 API).
 
     A single async SESv2 client is created lazily on first use and reused for
     the lifetime of the backend.
@@ -32,7 +33,7 @@ class AWSSESBackend(EmailBackend):
 
     def __init__(
         self,
-        session: aioboto3.Session,
+        session: AioSession,
         *,
         default_from: str | None = None,
         endpoint_url: str | None = None,
@@ -70,11 +71,11 @@ class AWSSESBackend(EmailBackend):
         **kwargs,
     ) -> "AWSSESBackend":
         """Authenticate with explicit access key / secret."""
-        session = aioboto3.Session(
+        session = build_session(
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
             aws_session_token=aws_session_token,
-            region_name=region,
+            region=region,
         )
         return cls(
             session,
@@ -92,7 +93,7 @@ class AWSSESBackend(EmailBackend):
         **kwargs,
     ) -> "AWSSESBackend":
         """Authenticate via IAM role / instance profile / environment variables."""
-        session = aioboto3.Session(region_name=region)
+        session = build_session(region=region)
         return cls(
             session,
             default_from=default_from,
@@ -110,7 +111,7 @@ class AWSSESBackend(EmailBackend):
         **kwargs,
     ) -> "AWSSESBackend":
         """Authenticate using a named profile from ``~/.aws/credentials``."""
-        session = aioboto3.Session(profile_name=profile_name, region_name=region)
+        session = build_session(profile_name=profile_name, region=region)
         return cls(
             session,
             default_from=default_from,
@@ -127,7 +128,7 @@ class AWSSESBackend(EmailBackend):
             return self._client
         async with self._lock:
             if self._client is None:
-                self._client_cm = self._session.client(
+                self._client_cm = self._session.create_client(
                     "sesv2",
                     endpoint_url=self._endpoint_url,
                     config=self._config,

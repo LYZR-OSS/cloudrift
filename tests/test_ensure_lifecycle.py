@@ -1,7 +1,7 @@
-"""Regression tests for `_ensure()` / `close()` lifecycle on the aioboto3 backends.
+"""Regression tests for `_ensure()` / `close()` lifecycle on the aiobotocore backends.
 
 These cover the bug introduced in 0.2.0 where a failed ``__aenter__`` on the
-underlying aioboto3 client context manager would leave ``_client_cm`` set but
+underlying aiobotocore client context manager would leave ``_client_cm`` set but
 ``_client`` ``None``. A subsequent ``close()`` would then call ``__aexit__`` on
 a never-entered context manager, raising a second exception that masked the
 original error.
@@ -55,7 +55,7 @@ class Boom(Exception):
 
 def _fake_session(cm):
     session = MagicMock(name="session")
-    session.client = MagicMock(return_value=cm)
+    session.create_client = MagicMock(return_value=cm)
     return session
 
 

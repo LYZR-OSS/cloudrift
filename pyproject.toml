@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lyzr-cloudrift"
-version = "0.4.1"
-description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, SQL, crypto (KMS), pub/sub, and email across AWS, Azure, and GCP"
+version = "0.5.0"
+description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, SQL, crypto (KMS), pub/sub, email, and code sandboxes across AWS, Azure, and GCP"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -13,7 +13,8 @@ keywords = [
     "cloud", "aws", "azure", "gcp", "s3", "blob", "gcs", "sqs", "servicebus",
     "documentdb", "cosmosdb", "firestore", "redis", "elasticache", "memorystore",
     "cache", "secrets", "keyvault", "secret-manager", "sns", "eventgrid",
-    "pubsub", "kms", "email", "ses", "smtp",
+    "pubsub", "kms", "email", "ses", "smtp", "sandbox", "code-execution",
+    "microvm", "e2b",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -34,7 +35,7 @@ Documentation = "https://github.com/LYZR-OSS/cloudrift#readme"
 
 [project.optional-dependencies]
 aws = [
-    "aioboto3>=13.0.0",       # native async S3 / SQS / SNS / Secrets Manager / SES
+    "aiobotocore>=3.9.1",     # native async S3 / SQS / SNS / Secrets Manager / SES / KMS / Lambda MicroVMs
     "aiohttp>=3.14.3",        # security floor for aiobotocore transitive (GHSA-mfx4-hv73-q22v, GHSA-cq5v-8q36-5273)
     "motor>=3.3.0",           # async MongoDB driver for DocumentDB
     "pymongo[aws]>=4.6.3",    # sync MongoDB driver + MONGODB-AWS IAM auth (pymongo-auth-aws)
@@ -43,7 +44,7 @@ aws = [
 azure = [
     "azure-storage-blob>=12.19.0",
     "azure-servicebus>=7.11.0",
-    "azure-identity>=1.15.0",
+    "azure-identity>=1.16.1",  # GHSA-m5vv-6r4h-3vj9 fixed in 1.16.1
     "azure-keyvault-secrets>=4.7.0",
     "azure-keyvault-keys>=4.8.0",   # Key Vault keys crypto (KMS analog)
     "cryptography>=50.0.1",         # AES-GCM data key for envelope encryption
@@ -77,6 +78,17 @@ cache = [
 email = [
     "aiosmtplib>=3.0",        # raw SMTP backend
 ]
+sandbox-aws = [
+    "aiobotocore>=3.9.1",     # control plane: Lambda MicroVMs (RunMicrovm, tokens, lifecycle)
+    "aiohttp>=3.14.3",        # data plane: per-microVM HTTPS exec endpoint
+]
+sandbox-azure = [
+    "azure-identity>=1.16.1", # Entra token for the dynamic-sessions pool; GHSA-m5vv-6r4h-3vj9
+    "aiohttp>=3.14.3",        # data plane: pool management + exec REST calls
+]
+sandbox-e2b = [
+    "e2b>=2.2.0",
+]
 # SQL connection + auth backends (one extra per engine — install only what you use).
 sql-postgres = [
     "psycopg[binary]>=3.1",   # PostgreSQL / Redshift (async); RDS IAM needs boto3
@@ -88,7 +100,7 @@ sql-mysql = [
 sql-mssql = [
     "aioodbc>=0.4",           # MS SQL Server / Azure SQL (requires system ODBC Driver 18)
     "cryptography>=50.0.1",   # self-signed certificate pinning (>=50.0.1: GHSA-537c-gmf6-5ccf, GHSA-g6cj-pr64-35w5)
-    "azure-identity>=1.15.0", # Azure AD / Entra token auth
+    "azure-identity>=1.16.1", # Azure AD / Entra token auth; GHSA-m5vv-6r4h-3vj9
 ]
 sql-oracle = [
     "oracledb>=2.0",
@@ -102,12 +114,12 @@ sql = [
     "mysql-connector-python>=8.2",
     "aioodbc>=0.4",
     "cryptography>=50.0.1",
-    "azure-identity>=1.15.0",
+    "azure-identity>=1.16.1",
     "oracledb>=2.0",
     "databricks-sql-connector>=3.0",
 ]
 all = [
-    "aioboto3>=13.0.0",
+    "aiobotocore>=3.9.1",
     "aiohttp>=3.14.3",
     "motor>=3.3.0",
     "pymongo[aws]>=4.7",
@@ -118,7 +130,7 @@ all = [
     "google-cloud-kms>=2.21.0",
     "azure-storage-blob>=12.19.0",
     "azure-servicebus>=7.11.0",
-    "azure-identity>=1.15.0",
+    "azure-identity>=1.16.1",
     "azure-keyvault-secrets>=4.7.0",
     "azure-keyvault-keys>=4.8.0",
     "azure-eventgrid>=4.9.0",
@@ -131,12 +143,13 @@ all = [
     "cryptography>=50.0.1",
     "oracledb>=2.0",
     "databricks-sql-connector>=3.0",
+    "e2b>=2.2.0",
 ]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "moto[s3,sqs,sns,ses,secretsmanager,kms,server]>=5.0",
-    "aioboto3>=13.0.0",
+    "aiobotocore>=3.9.1",
     "motor>=3.3.0",
     "pymongo[aws]>=4.7",
     "google-auth>=2.28.0",
@@ -150,14 +163,15 @@ dev = [
     "aiosmtplib>=3.0",
     "azure-communication-email>=1.0.0",
     "azure-storage-blob>=12.19.0",
-    "azure-identity>=1.15.0",
+    "azure-identity>=1.16.1",
     "azure-keyvault-keys>=4.8.0",
     "cryptography>=50.0.1",
     "azure-servicebus>=7.11.0",
+    "e2b>=2.2.0",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["cloudrift"]
+only-include = ["cloudrift", "cloudrift_sandbox_server.py"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
