@@ -27,6 +27,7 @@ from cloudrift.sandbox.base import (
 _TOKEN_TTL_MINUTES = 30
 _TOKEN_SAFETY_MARGIN_SECONDS = 300
 _LIVE_STATES = frozenset({"PENDING", "RUNNING", "SUSPENDING", "SUSPENDED"})
+_TERMINAL_STATES = frozenset({"TERMINATING", "TERMINATED"})
 
 
 def _normalize_endpoint(raw: str) -> str:
@@ -41,9 +42,9 @@ class AWSMicroVMSandboxBackend(SandboxBackend):
     Control plane through ``aiobotocore`` (service ``lambda-microvms``), data
     plane through ``aiohttp`` against the per-microVM HTTPS endpoint. Each
     session is a Firecracker microVM built from a caller-supplied container
-    image, with snapshot suspend/resume: a suspended microVM costs no compute
-    and the service auto-resumes it transparently on the next request, so
-    this backend exposes no explicit ``suspend``/``resume`` methods.
+    image. Idle VMs suspend after five minutes, retaining native state until
+    their absolute eight-hour lifetime expires. ``session_alive`` never wakes
+    one; ``resume_session`` waits for the same VM's endpoint to be ready.
 
     Use one of the class methods to construct:
     - ``from_access_key`` — static credentials (+ optional session token)
@@ -61,8 +62,8 @@ class AWSMicroVMSandboxBackend(SandboxBackend):
         ingress_connector_arn: str | None = None,
         egress_connector_arn: str | None = None,
         region: str | None = None,
-        max_idle_seconds: int = 900,
-        suspended_seconds: int = 3600,
+        max_idle_seconds: int = 300,
+        suspended_seconds: int = 28800,
         startup_timeout_seconds: int = 60,
         read_chunk_bytes: int = DEFAULT_READ_CHUNK_BYTES,
         write_chunk_b64: int = DEFAULT_WRITE_CHUNK_B64,
@@ -243,6 +244,8 @@ class AWSMicroVMSandboxBackend(SandboxBackend):
         except ClientError as exc:
             code = exc.response["Error"]["Code"]
             if code == "ResourceNotFoundException":
+                self._endpoints.pop(session_id, None)
+                self._tokens.pop(session_id, None)
                 return False
             self._raise(exc, session_id)
         state = resp.get("state")
@@ -251,7 +254,92 @@ class AWSMicroVMSandboxBackend(SandboxBackend):
             if endpoint:
                 self._endpoints[session_id] = _normalize_endpoint(endpoint)
             return True
-        return False
+        if state in _TERMINAL_STATES:
+            self._endpoints.pop(session_id, None)
+            self._tokens.pop(session_id, None)
+            return False
+        raise SandboxError(f"Unknown state for microVM {session_id!r}: {state!r}")
+
+    async def resume_session(
+        self, session_id: str, *, timeout_seconds: int = 300
+    ) -> bool:
+        """Wake a suspended MicroVM through authenticated endpoint traffic.
+
+        State is eventually consistent, so readiness is determined by /health.
+        PENDING and SUSPENDING are transitional, not absent; timeouts and
+        permission/network failures cannot be interpreted as expiration.
+        ``timeout_seconds`` controls only this readiness wait: the native
+        maximumDurationInSeconds is fixed at creation and cannot be renewed.
+        """
+        client = await self._ensure()
+        http = await self._http_session()
+        deadline = time.monotonic() + timeout_seconds
+        delay = 0.5
+        last_status = "no response"
+        retried_auth = False
+        while True:
+            try:
+                resp = await client.get_microvm(microvmIdentifier=session_id)
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+                    self._endpoints.pop(session_id, None)
+                    self._tokens.pop(session_id, None)
+                    return False
+                self._raise(exc, session_id)
+            state = resp.get("state")
+            if state in _TERMINAL_STATES:
+                self._endpoints.pop(session_id, None)
+                self._tokens.pop(session_id, None)
+                return False
+            if state not in _LIVE_STATES:
+                raise SandboxError(f"Unknown state for microVM {session_id!r}: {state!r}")
+
+            endpoint = resp.get("endpoint")
+            if endpoint:
+                endpoint = _normalize_endpoint(endpoint)
+                self._endpoints[session_id] = endpoint
+            if endpoint:
+                try:
+                    token = await self._token(session_id)
+                except SandboxSessionNotFoundError:
+                    self._endpoints.pop(session_id, None)
+                    self._tokens.pop(session_id, None)
+                    return False
+                headers = {"X-aws-proxy-auth": token, "X-aws-proxy-port": str(SANDBOX_EXEC_PORT)}
+                try:
+                    async with http.get(
+                        f"{endpoint}{SANDBOX_HEALTH_PATH}",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as health:
+                        if health.status == 200:
+                            return True
+                        if health.status in (401, 403):
+                            if retried_auth:
+                                raise SandboxPermissionError(
+                                    f"authorization failed for microVM {session_id!r} "
+                                    "after token refresh"
+                                )
+                            self._tokens.pop(session_id, None)
+                            retried_auth = True
+                        elif health.status in (404, 408, 429, 500, 502, 503, 504):
+                            last_status = str(health.status)
+                        else:
+                            raise SandboxError(
+                                f"microVM {session_id!r} health check failed "
+                                f"with status {health.status}"
+                            )
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    last_status = str(exc)
+            else:
+                last_status = state
+            if time.monotonic() >= deadline:
+                raise SandboxError(
+                    f"MicroVM {session_id!r} did not resume within "
+                    f"{timeout_seconds}s (last status: {last_status})"
+                )
+            await asyncio.sleep(min(delay, max(0, deadline - time.monotonic())))
+            delay = min(delay * 1.5, 5.0)
 
     async def close_session(self, session_id: str) -> None:
         client = await self._ensure()
