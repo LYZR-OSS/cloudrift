@@ -732,7 +732,7 @@ image build itself belongs to the deploying service, not to this library):
 FROM public.ecr.aws/lambda/microvms:al2023-minimal
 RUN dnf install -y python3 python3-pip git tar gzip unzip procps-ng findutils which gcc make \
     && dnf clean all
-RUN pip3 install --no-deps --no-cache-dir lyzr-cloudrift==0.6.0
+RUN pip3 install --no-deps --no-cache-dir lyzr-cloudrift==0.5.1
 WORKDIR /workspace
 EXPOSE 8080 9000
 CMD ["python3", "-u", "-m", "cloudrift_sandbox_server"]

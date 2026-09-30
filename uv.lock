@@ -1569,7 +1569,7 @@ wheels = [
 
 [[package]]
 name = "lyzr-cloudrift"
-version = "0.6.0"
+version = "0.5.1"
 source = { editable = "." }
 
 [package.optional-dependencies]
