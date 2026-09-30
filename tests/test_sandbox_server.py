@@ -52,6 +52,9 @@ class _LocalHTTPBackend(SandboxBackend):
     async def session_alive(self, session_id: str) -> bool:
         return True
 
+    async def resume_session(self, session_id: str, *, timeout_seconds: int = 300) -> bool:
+        return True
+
     async def close_session(self, session_id: str) -> None:
         pass
 
