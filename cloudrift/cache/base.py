@@ -1,14 +1,40 @@
+import asyncio
+import contextlib
+import secrets
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 import redis.asyncio as aioredis
 from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
-from redis.exceptions import ReadOnlyError, RedisError
+from redis.exceptions import ReadOnlyError, RedisError, WatchError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
-from cloudrift.core.exceptions import CacheError
+from cloudrift.core.exceptions import CacheError, CacheLockError
+
+# Namespace prefix for lock keys, so `lock("orders")` can never collide with a
+# plain cache key named "orders".
+_LOCK_KEY_PREFIX = "cloudrift:lock:"
+
+
+@dataclass
+class Lock:
+    """Handle to a held distributed lock, returned by :meth:`CacheBackend.lock`.
+
+    ``token`` is the fencing token proving ownership — required by
+    :meth:`CacheBackend.extend_lock` / :meth:`CacheBackend.release_lock` so a
+    caller can only act on a lock it actually still holds, never one that
+    expired and was re-acquired by someone else in the meantime.
+    """
+
+    key: str
+    token: str
+    ttl: float
+    _extend_task: "asyncio.Task | None" = field(default=None, repr=False, compare=False)
+
 
 # Defaults for every Redis-backed cache client.
 #
@@ -222,6 +248,70 @@ class CacheBackend(ABC):
         await self.set(key, value, ttl=ttl)
 
     @asynccontextmanager
+    async def lock(
+        self,
+        key: str,
+        ttl: float = 10.0,
+        *,
+        blocking_timeout: float | None = 10.0,
+        retry_interval: float = 0.1,
+        auto_extend: bool = True,
+    ) -> "AsyncIterator[Lock]":
+        """Acquire a distributed lock scoped to *key*, released on context exit.
+
+        Usage::
+
+            async with cache.lock("invoice:42:close"):
+                ...  # only one process/replica runs this at a time
+
+        Backed by ``SET key token NX PX ttl`` plus a random *fencing token* —
+        never a bare ``DEL`` — so a caller can only release or extend the lock
+        it actually holds. A slow holder that outlives ``ttl`` cannot delete a
+        lock some other process has since acquired for the same key, which is
+        the classic bug naive "set-then-delete" locks have.
+
+        Args:
+            key: Lock name. Namespaced internally so it can't collide with a
+                regular cache key of the same name.
+            ttl: Seconds the lock is held for before it expires unclaimed.
+                Must outlast the critical section, or set ``auto_extend=True``
+                (the default) to have it refreshed automatically in the
+                background for as long as the ``async with`` block runs.
+            blocking_timeout: Max seconds to wait for the lock before giving up.
+                ``0`` or ``None`` means try once and fail immediately if held.
+            retry_interval: Seconds between acquisition attempts while blocking.
+            auto_extend: Refresh the TTL from a background task at roughly
+                ``ttl / 3`` while the lock is held, so a critical section
+                running longer than expected doesn't have its lock silently
+                expire and get acquired by someone else mid-operation. The
+                watchdog stops as soon as the block exits; it never keeps a
+                lock alive past that.
+
+        Raises:
+            CacheLockError: if the lock could not be acquired within
+                ``blocking_timeout``.
+
+        Backends that don't support atomic conditional writes should not
+        override this — the default raises ``NotImplementedError``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support lock()")
+
+    async def extend_lock(self, lock: "Lock", ttl: float = 10.0) -> bool:
+        """Refresh a held lock's TTL. Returns ``False`` if *lock* is no longer held.
+
+        Rarely needed directly — :meth:`lock` auto-extends by default. Useful
+        for callers managing a lock's lifetime manually instead of via the
+        ``async with`` block.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support extend_lock()")
+
+    async def release_lock(self, lock: "Lock") -> bool:
+        """Release a held lock. Returns ``False`` if *lock* was already lost
+        (expired, or released/stolen by another caller) — safe to call in a
+        ``finally`` without first checking ownership."""
+        raise NotImplementedError(f"{type(self).__name__} does not support release_lock()")
+
+    @asynccontextmanager
     async def pipeline(self):
         """Batch multiple commands.
 
@@ -272,6 +362,7 @@ class _SequentialPipeline:
         def queue(*args, **kwargs):
             self._ops.append((name, args, kwargs))
             return self
+
         return queue
 
     async def execute(self) -> list:
@@ -492,6 +583,96 @@ class _RedisMixin:
             await self._client.mset(mapping)
         except RedisError as e:
             raise CacheError(str(e)) from e
+
+    async def _cas_key(self, redis_key: str, token: str, then) -> bool:
+        """WATCH ``redis_key``; if its value still equals ``token``, run ``then``
+        on a MULTI pipeline and EXEC it. Returns whether the mutation happened.
+
+        This is the compare-and-mutate primitive both :meth:`release_lock` and
+        :meth:`extend_lock` are built on. It's expressed with WATCH/MULTI rather
+        than a Lua script (``EVAL``) so it works unmodified against any
+        Redis-protocol server that restricts scripting (some managed offerings
+        do) and against fakeredis in tests.
+        """
+        try:
+            async with self._client.pipeline(transaction=True) as pipe:
+                await pipe.watch(redis_key)
+                current = await pipe.get(redis_key)
+                if current is None or current.decode() != token:
+                    await pipe.reset()
+                    return False
+                pipe.multi()
+                then(pipe)
+                await pipe.execute()
+                return True
+        except WatchError:
+            # Someone else mutated the key between WATCH and EXEC — by
+            # construction that can only mean our lock already expired and was
+            # re-acquired, so treat it the same as "no longer held".
+            return False
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+    async def release_lock(self, lock: "Lock") -> bool:
+        task, lock._extend_task = lock._extend_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        redis_key = _LOCK_KEY_PREFIX + lock.key
+        return await self._cas_key(redis_key, lock.token, lambda pipe: pipe.delete(redis_key))
+
+    async def extend_lock(self, lock: "Lock", ttl: float = 10.0) -> bool:
+        redis_key = _LOCK_KEY_PREFIX + lock.key
+        extended = await self._cas_key(
+            redis_key, lock.token, lambda pipe: pipe.pexpire(redis_key, int(ttl * 1000))
+        )
+        if extended:
+            lock.ttl = ttl
+        return extended
+
+    async def _watchdog(self, lock: "Lock") -> None:
+        """Background task: refresh *lock*'s TTL at roughly a third of its
+        length for as long as it's held. Cancelled by :meth:`release_lock`."""
+        while True:
+            await asyncio.sleep(lock.ttl / 3)
+            if not await self.extend_lock(lock, lock.ttl):
+                return
+
+    @asynccontextmanager
+    async def lock(
+        self,
+        key: str,
+        ttl: float = 10.0,
+        *,
+        blocking_timeout: float | None = 10.0,
+        retry_interval: float = 0.1,
+        auto_extend: bool = True,
+    ) -> "AsyncIterator[Lock]":
+        redis_key = _LOCK_KEY_PREFIX + key
+        token = secrets.token_hex(16)
+        loop = asyncio.get_running_loop()
+        deadline = None if blocking_timeout is None else loop.time() + blocking_timeout
+        try:
+            while True:
+                acquired = await self._client.set(redis_key, token, nx=True, px=int(ttl * 1000))
+                if acquired:
+                    break
+                if deadline is not None and loop.time() >= deadline:
+                    raise CacheLockError(
+                        f"Could not acquire lock {key!r} within {blocking_timeout}s"
+                    )
+                await asyncio.sleep(retry_interval)
+        except RedisError as e:
+            raise CacheError(str(e)) from e
+
+        held = Lock(key=key, token=token, ttl=ttl)
+        if auto_extend:
+            held._extend_task = asyncio.ensure_future(self._watchdog(held))
+        try:
+            yield held
+        finally:
+            await self.release_lock(held)
 
     @asynccontextmanager
     async def pipeline(self):
