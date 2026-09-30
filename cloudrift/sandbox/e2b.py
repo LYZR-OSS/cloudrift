@@ -126,6 +126,8 @@ class E2BSandboxBackend(SandboxBackend):
 
     async def close_session(self, session_id: str) -> None:
         self._sandboxes.pop(session_id, None)
+        # kill() returns False on 404, so closing a missing sandbox is already
+        # a no-op; auth, network and server failures must still raise.
         await AsyncSandbox.kill(session_id, api_key=self._api_key)
 
     async def list_sessions(self) -> list[SandboxSessionInfo]:

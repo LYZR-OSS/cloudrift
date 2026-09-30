@@ -152,6 +152,10 @@ class AzureSandboxesBackend(SandboxBackend):
         lookup alone is not an atomic create-if-absent operation.
         ``timeout_seconds`` is not an absolute TTL: the native idle and
         stopped-retention policies govern lifetime.
+
+        A Failed or Deleting VM can never be resumed, so it is not a recovery
+        candidate; it is left in place for inspection and a new VM is created.
+        Any other resume failure propagates: it does not prove the VM is gone.
         """
         logical_key = hashlib.sha256(key.encode()).hexdigest()
         try:
@@ -161,6 +165,7 @@ class AzureSandboxesBackend(SandboxBackend):
                 )
                 if sb.labels.get("scope") == self._scope
                 and sb.labels.get("logical_key") == logical_key
+                and (sb.state or "").lower() not in _TERMINAL_STATES
             ]
         except AzureError as exc:
             raise self._error(exc, "<group>") from exc

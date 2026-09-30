@@ -6,6 +6,7 @@ layer in ``cloudrift.sandbox.base`` uses an in-memory shell backend.
 """
 
 import base64
+import hashlib
 import os
 import re
 import time
@@ -29,6 +30,8 @@ from cloudrift.sandbox.base import (
     FileEntry,
     SandboxBackend,
 )
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
+from cloudrift.sandbox.azure_sandbox import AzureSandboxesBackend
 from cloudrift.sandbox.e2b import E2BSandboxBackend
 from e2b import CommandExitException
 
@@ -513,6 +516,238 @@ async def test_terminate_microvm_not_found_is_swallowed():
     backend._ensure = AsyncMock(return_value=fake_client)
 
     await backend.close_session("mv-x")  # must not raise
+
+# ---------------------------------------------------------------------------
+# 4. Azure Container Apps Sandboxes
+# ---------------------------------------------------------------------------
+
+
+def _http_error(status: int) -> HttpResponseError:
+    exc = HttpResponseError(message=f"HTTP {status}")
+    exc.status_code = status
+    return exc
+
+
+class _FakeAzureSandbox:
+    """One remote VM plus the sandbox-scoped client calls made against it."""
+
+    def __init__(self, sandbox_id, *, state="Running", labels=None, get_states=None):
+        self.sandbox_id = sandbox_id
+        self.state = state
+        self.labels = labels or {}
+        self._get_states = list(get_states or [])
+        self.policies = []
+        self.resume = AsyncMock()
+        self.delete = AsyncMock()
+        self.exec = AsyncMock(
+            return_value=SimpleNamespace(stdout="ok\n__CRSB_RC__0", stderr="", exit_code=0)
+        )
+
+    def summary(self):
+        return SimpleNamespace(
+            id=self.sandbox_id,
+            state=self.state,
+            labels=self.labels,
+            created_at="2026-09-01T00:00:00",
+            state_details=None,
+        )
+
+    async def get(self):
+        # Each get() consumes a scripted state; an AzureError entry is raised.
+        if self._get_states:
+            step = self._get_states.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            self.state = step
+        return self.summary()
+
+    async def set_lifecycle_policy(self, policy):
+        self.policies.append(policy)
+
+
+class _FakeSandboxGroup:
+    """Ignores the server-side label filter so the backend's own check is exercised."""
+
+    def __init__(self, *sandboxes):
+        self.sandboxes = {sb.sandbox_id: sb for sb in sandboxes}
+        self.created = []
+
+    async def list_sandboxes(self, labels=None):
+        for sb in list(self.sandboxes.values()):
+            yield sb.summary()
+
+    def get_sandbox_client(self, sandbox_id):
+        sb = self.sandboxes.get(sandbox_id)
+        if sb is None:
+            missing = _FakeAzureSandbox(sandbox_id, get_states=[ResourceNotFoundError("gone")])
+            missing.delete = AsyncMock(side_effect=ResourceNotFoundError("gone"))
+            return missing
+        return sb
+
+    async def begin_create_sandbox(self, *, labels, **kwargs):
+        sb = _FakeAzureSandbox(f"new-{len(self.created)}", labels=labels)
+        self.sandboxes[sb.sandbox_id] = sb
+        self.created.append(sb)
+        return SimpleNamespace(result=AsyncMock(return_value=sb))
+
+
+def _azure_backend(group, **overrides) -> AzureSandboxesBackend:
+    with patch("cloudrift.sandbox.azure_sandbox.SandboxGroupClient", return_value=group):
+        return AzureSandboxesBackend(
+            "sub", "rg", "group", "eastus", MagicMock(name="credential"), **overrides
+        )
+
+
+def _labels_for(key, scope="lyzr-agent"):
+    return {"scope": scope, "logical_key": hashlib.sha256(key.encode()).hexdigest()}
+
+
+@pytest.fixture
+def _no_azure_sleep(monkeypatch):
+    from cloudrift.sandbox import azure_sandbox
+
+    monkeypatch.setattr(azure_sandbox.asyncio, "sleep", AsyncMock())
+
+
+async def test_azure_open_session_resumes_labeled_vm_instead_of_creating(_no_azure_sleep):
+    existing = _FakeAzureSandbox(
+        "sb-1", state="Suspended", labels=_labels_for("k"), get_states=["Suspended", "Running"]
+    )
+    group = _FakeSandboxGroup(existing)
+    backend = _azure_backend(group, retention_seconds=86_400)
+
+    assert await backend.open_session("k") == "sb-1"
+
+    assert group.created == []
+    existing.resume.assert_awaited_once()
+    assert existing.policies[-1].auto_delete.delete_interval_seconds == 86_400
+
+
+async def test_azure_open_session_creates_labeled_vm_with_retention_policy():
+    group = _FakeSandboxGroup()
+    backend = _azure_backend(group, idle_seconds=120, retention_seconds=3600)
+
+    session_id = await backend.open_session("k")
+
+    created = group.created[0]
+    assert session_id == created.sandbox_id
+    assert created.labels == _labels_for("k")
+    (policy,) = created.policies
+    assert policy.auto_suspend.interval == 120
+    assert policy.auto_delete.enabled and policy.auto_delete.delete_interval_seconds == 3600
+
+
+async def test_azure_open_session_deletes_new_vm_when_retention_policy_fails():
+    group = _FakeSandboxGroup()
+    backend = _azure_backend(group)
+    original_create = group.begin_create_sandbox
+
+    async def create_with_failing_policy(**kwargs):
+        poller = await original_create(**kwargs)
+        group.created[0].set_lifecycle_policy = AsyncMock(side_effect=_http_error(500))
+        return poller
+
+    group.begin_create_sandbox = create_with_failing_policy
+
+    with pytest.raises(SandboxError):
+        await backend.open_session("k")
+
+    group.created[0].delete.assert_awaited_once()
+
+
+@pytest.mark.parametrize("terminal_state", ["Failed", "Deleting"])
+async def test_azure_open_session_replaces_terminal_vm_and_recovers_the_replacement(
+    terminal_state,
+):
+    dead = _FakeAzureSandbox("sb-dead", state=terminal_state, labels=_labels_for("k"))
+    group = _FakeSandboxGroup(dead)
+    backend = _azure_backend(group)
+
+    first = await backend.open_session("k")
+    # The dead VM still carries the same labels; it must not make the key ambiguous.
+    second = await backend.open_session("k")
+
+    assert first == second == group.created[0].sandbox_id
+    assert len(group.created) == 1
+    dead.delete.assert_not_awaited()
+
+
+async def test_azure_open_session_transient_resume_error_never_creates_duplicate():
+    existing = _FakeAzureSandbox(
+        "sb-1", state="Suspended", labels=_labels_for("k"), get_states=[_http_error(503)]
+    )
+    group = _FakeSandboxGroup(existing)
+    backend = _azure_backend(group)
+
+    with pytest.raises(SandboxError):
+        await backend.open_session("k")
+
+    assert group.created == []
+
+
+async def test_azure_resume_session_false_only_when_missing(_no_azure_sleep):
+    failed = _FakeAzureSandbox("sb-failed", state="Failed")
+    backend = _azure_backend(_FakeSandboxGroup(failed))
+
+    assert await backend.resume_session("sb-missing") is False
+    with pytest.raises(SandboxError, match="Failed"):
+        await backend.resume_session("sb-failed")
+
+
+async def test_azure_resume_session_resumes_once_and_waits_for_running(_no_azure_sleep):
+    sb = _FakeAzureSandbox("sb-1", get_states=["Stopped", "Resuming", "Resuming", "Running"])
+    backend = _azure_backend(_FakeSandboxGroup(sb))
+
+    assert await backend.resume_session("sb-1") is True
+    sb.resume.assert_awaited_once()
+
+
+async def test_azure_session_alive_never_wakes_suspended_vm():
+    sb = _FakeAzureSandbox("sb-1", state="Suspended")
+    backend = _azure_backend(_FakeSandboxGroup(sb))
+
+    assert await backend.session_alive("sb-1") is True
+    assert await backend.session_alive("sb-missing") is False
+    sb.resume.assert_not_awaited()
+
+
+async def test_azure_close_session_ignores_missing_but_raises_on_denied():
+    denied = _FakeAzureSandbox("sb-denied")
+    denied.delete = AsyncMock(side_effect=_http_error(403))
+    backend = _azure_backend(_FakeSandboxGroup(denied))
+
+    await backend.close_session("sb-missing")  # must not raise
+    with pytest.raises(SandboxPermissionError):
+        await backend.close_session("sb-denied")
+
+
+async def test_azure_list_sessions_is_scope_filtered_and_timezone_aware():
+    ours = _FakeAzureSandbox("sb-ours", labels={"scope": "lyzr-agent"})
+    theirs = _FakeAzureSandbox("sb-theirs", labels={"scope": "someone-else"})
+    backend = _azure_backend(_FakeSandboxGroup(ours, theirs))
+
+    (session,) = await backend.list_sessions()
+
+    assert session.session_id == "sb-ours"
+    assert session.created_at.tzinfo is not None
+
+
+async def test_azure_exec_extends_idle_policy_and_restores_it_only_on_success():
+    sb = _FakeAzureSandbox("sb-1")
+    backend = _azure_backend(_FakeSandboxGroup(sb), idle_seconds=60)
+
+    result = await backend.exec("sb-1", "make", timeout_seconds=100)
+
+    assert result == ExecResult("ok", "", 0)
+    assert [p.auto_suspend.interval for p in sb.policies] == [160, 60]
+
+    sb.policies.clear()
+    sb.exec = AsyncMock(side_effect=_http_error(503))
+    with pytest.raises(SandboxError):
+        await backend.exec("sb-1", "make", timeout_seconds=100)
+    # The guest job may still be running, so the extended policy must stay.
+    assert [p.auto_suspend.interval for p in sb.policies] == [160]
+
 
 
 # ---------------------------------------------------------------------------
