@@ -1,6 +1,6 @@
 # cloudrift
 
-Cloud-agnostic abstraction for **storage**, **messaging**, **document databases**, **cache**, **secrets**, **SQL**, **crypto (KMS)**, **pub/sub**, **email**, and **code sandboxes** — built for Lyzr microservices.
+Cloud-agnostic abstraction for **storage**, **messaging**, **document databases**, **cache**, **secrets**, **SQL**, **crypto (KMS)**, **pub/sub**, **email**, **code sandboxes**, and **workload identity** — built for Lyzr microservices.
 
 - **Async-first.** Every public method is `async def`, backed by native-async SDK clients (`aiobotocore`, `azure.*.aio`, `gcloud-aio-storage`, the Google async GAPIC clients, `motor`, `redis.asyncio`, `aiosmtplib`) — no thread-pool wrapping.
 - **Drop-in providers.** Same interface across AWS, Azure, GCP, and self-hosted backends. Swap `s3` ↔ `azure_blob` ↔ `gcs` (or `sqs` ↔ `azure_bus` ↔ `gcp_pubsub`, `documentdb` ↔ `cosmos` ↔ `firestore`, `redis` ↔ `elasticache` ↔ `azure_redis` ↔ `memorystore`, `ses` ↔ `azure_acs` ↔ `smtp`) by changing one string.
@@ -17,12 +17,18 @@ Cloud-agnostic abstraction for **storage**, **messaging**, **document databases*
 | Crypto (KMS) | KMS | Key Vault keys | Cloud KMS | — |
 | Pub/Sub | SNS | Event Grid | Pub/Sub | — |
 | Email | SES | Communication Services | — (see note) | SMTP |
+| Workload identity | — (see note) | Entra (managed identity / workload identity federation) | — (see note) | — |
 | Sandbox | Lambda MicroVMs | Container Apps dynamic sessions | — | E2B |
 
 > **GCP email:** Google Cloud has no transactional email service (no SES/ACS
 > equivalent — the App Engine Mail API is legacy). On GCP, use the `smtp`
 > provider pointed at SendGrid, Mailgun, or Postmark. That is the intended path,
 > not a missing feature.
+
+> **Workload identity on AWS/GCP:** EKS (IRSA) and GKE Workload Identity issue
+> OIDC tokens of the same shape, and `OIDCWorkloadVerifier` is provider-neutral
+> precisely so they drop in. They are simply not implemented yet — an honest
+> gap, not a design limit. Add a provider module and a factory branch.
 
 ---
 
@@ -36,6 +42,7 @@ pip install "cloudrift[azure]"        # Blob + Service Bus + Cosmos + ACS Email 
 pip install "cloudrift[gcp]"          # GCS + Pub/Sub + Firestore + Secret Manager + KMS + Redis client
 pip install "cloudrift[cache]"        # Just Redis (any flavour)
 pip install "cloudrift[email]"        # Just raw SMTP (aiosmtplib)
+pip install "cloudrift[identity]"     # Workload identity token verification (no cloud SDK)
 pip install "cloudrift[sandbox-aws]"    # Lambda MicroVMs sandbox client
 pip install "cloudrift[sandbox-azure]"  # Container Apps dynamic sessions sandbox client
 pip install "cloudrift[sandbox-e2b]"    # E2B sandbox client
@@ -831,3 +838,48 @@ for cents. Two do not, and skip by default:
 > *versions* can be destroyed. The teardown script destroys the versions (stopping the
 > ~$0.06/version/month charge) but the ring and key remain in the project forever. This
 > is the only resource here that outlives teardown.
+
+---
+
+## Workload identity
+
+Verifies that a caller is a particular **cloud-managed workload identity**, so
+one service can authenticate another with no shared secret. The workload asks
+its own cloud platform for a token at runtime; this checks the token and
+reports the principal behind it.
+
+Unlike the other categories this holds no cloud SDK client — it is an OIDC JWT
+verifier plus a JWKS cache — and it deliberately stops at *who is calling*.
+Mapping that principal to a tenant, authorizing it, or issuing your own
+credential is application logic and stays in the application.
+
+```python
+from cloudrift.identity import get_workload_verifier
+
+# Construct once at startup — the signing-key cache lives on the instance.
+verifier = get_workload_verifier(
+    "entra",
+    tenant_id="<entra directory id>",
+    accepted_audiences=["api://my-service"],
+)
+
+principal = await verifier.verify(bearer_token)
+principal.principal_id   # the managed identity's object id (oid)
+principal.tenant_id      # the Entra tenant
+principal.client_id      # appid / azp, where the provider distinguishes them
+```
+
+`accepted_audiences` is **required**, unlike some OIDC relying parties where it
+is optional. An Entra token with no audience check is just "some token from
+this tenant", which would admit any application in the directory.
+
+Three errors, kept distinct so a service can answer correctly:
+
+| Exception | Meaning | Typical HTTP |
+|---|---|---|
+| `TokenVerificationError` | bad, expired, or non-conforming token | 401 |
+| `IdentityNotConfiguredError` | the verifier was built without a tenant/audience | 503 |
+| `IdentityProviderUnavailableError` | the IdP's signing keys are unreachable | 503 |
+
+The last two are separate from the first on purpose: a forged token and an IdP
+outage are not the same event and must not be reported as the same error.

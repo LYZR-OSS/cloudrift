@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`lyzr-cloudrift` is a cloud-agnostic abstraction layer for Lyzr microservices, covering ten categories: **storage**, **messaging**, **document DB**, **cache**, **secrets**, **SQL**, **crypto (KMS)**, **pub/sub**, **email**, and **sandbox**. Each category exposes the same interface across AWS, Azure, GCP, and (for cache/email) self-hosted backends, so a service swaps providers by changing a single string. Everything is **async-first** — public methods are `async def`, backed by native-async SDK clients (`aiobotocore`, `azure.*.aio`, `gcloud-aio-storage`, Google async GAPIC clients, `motor`, `redis.asyncio`, `aiosmtplib`); there is no thread-pool wrapping. The one deliberate exception: the document category also exposes an **optional sync factory** (`get_mongodb_sync`, returns a plain `pymongo` client) for callers on sync frameworks.
+`lyzr-cloudrift` is a cloud-agnostic abstraction layer for Lyzr microservices, covering eleven categories: **storage**, **messaging**, **document DB**, **cache**, **secrets**, **SQL**, **crypto (KMS)**, **pub/sub**, **email**, **sandbox**, and **workload identity**. Each category exposes the same interface across AWS, Azure, GCP, and (for cache/email) self-hosted backends, so a service swaps providers by changing a single string. Everything is **async-first** — public methods are `async def`, backed by native-async SDK clients (`aiobotocore`, `azure.*.aio`, `gcloud-aio-storage`, Google async GAPIC clients, `motor`, `redis.asyncio`, `aiosmtplib`); there is no thread-pool wrapping. The one deliberate exception: the document category also exposes an **optional sync factory** (`get_mongodb_sync`, returns a plain `pymongo` client) for callers on sync frameworks.
 
 ## Commands
 
@@ -27,7 +27,7 @@ CI: pushes to `develop` test + publish to TestPyPI; pushes to `main` test + publ
 
 ## Architecture
 
-Nine of the ten categories (all but document) are self-contained packages under `cloudrift/` following an identical three-part shape:
+Ten of the eleven categories (all but document) are self-contained packages under `cloudrift/` following an identical three-part shape:
 
 1. **`base.py`** — an `ABC` defining the provider-neutral interface (e.g. `StorageBackend`, `CacheBackend`, `MessagingBackend`). All `@abstractmethod`s are async. Concrete, non-abstract helpers (`__aenter__`/`__aexit__`, `health_check`, default `pipeline`) live here too.
 2. **Per-provider modules** — e.g. `s3.py` + `azure_blob.py`, `redis_standalone.py` + `redis_elasticache.py` + `redis_azure.py`. Each subclasses the ABC and is constructed **only** via `from_*` classmethods (`from_iam_role`, `from_access_key`, `from_connection_string`, `from_managed_identity`, etc.) — never a bare `__init__` with credentials.
@@ -105,9 +105,48 @@ The four Redis backends (`redis`, `elasticache`, `azure_redis`, `memorystore`) s
 
 Memorystore differs from the other two managed Redis products in its **defaults**, and the constructors deliberately match the product rather than the house style: AUTH and in-transit encryption are both opt-in on Memorystore, so `from_auth_string` defaults to `ssl=False` (ElastiCache and Azure default to TLS on). Its server certificate is signed by a per-instance CA absent from the system trust store, so `from_server_ca_cert` makes `ssl_ca_certs` a **required** positional-ish argument instead of the optional one it is elsewhere — TLS without it always fails verification. Don't "harmonize" these defaults; they encode real product behavior.
 
+### Workload identity is a verifier, not a client
+
+The `identity` category breaks two house patterns on purpose, and both are
+load-bearing:
+
+- **It holds no cloud SDK.** `get_workload_verifier` returns an OIDC JWT
+  verifier plus a JWKS cache. The `identity` extra is `python-jose` + `httpx`
+  and pulls in neither `azure-identity` nor `boto3` — the workload gets its own
+  token from its platform, and cloudrift only checks it. `close()` still exists
+  so the lifecycle matches every other category.
+- **It stops at identification.** `verify()` returns a `WorkloadPrincipal` and
+  nothing else. Authorization, tenant mapping and credential issuance are the
+  caller's, and must not migrate in here — that is application policy, which is
+  exactly what this package has no business knowing.
+
+`OIDCWorkloadVerifier` in `base.py` owns the JWKS fetch/cache/rotate machinery
+and the rate limit on refetching an unknown `kid` (an unknown kid is also what
+a forged token looks like, so it must not become a fetch storm). A provider
+module supplies only `expected_issuers`, `jwks_url` and `_principal`, where its
+own claim rules live.
+
+`expected_issuers` is a tuple because Entra issues v1.0
+(`sts.windows.net/<tid>/`) and v2.0 (`login.microsoftonline.com/<tid>/v2.0`)
+tokens for the same tenant, chosen by the app registration's
+`accessTokenAcceptedVersion` rather than by the workload. **Issuer pinning is
+the primary cross-tenant control** — Entra's signing keys are shared across
+tenants, so a token from another directory is genuinely signed and only the
+issuer pin refuses it. The `tid` check in `entra.py` is defence in depth behind
+that, not the main gate; don't remove either on the grounds that the other
+covers it.
+
+`accepted_audiences` is **mandatory** for Entra (`configured` is False without
+it), unlike audience checks that are optional elsewhere: an unaudienced token
+is just "some token from this tenant" and would admit any app in the directory.
+
+When adding AWS (EKS/IRSA) or GCP (GKE Workload Identity), subclass
+`OIDCWorkloadVerifier`, add a `from_*` constructor and a factory branch — the
+base needs no change, which is the point of it being provider-neutral.
+
 ### Errors
 
-All backends raise from one hierarchy in `cloudrift/core/exceptions.py`, rooted at `CloudRiftError` with a per-category base (`StorageError`, `CacheError`, `MessagingError`, `DocumentError`, `SecretError`, `SQLError`, `CryptoError`, `PubSubError`, `EmailError`) and specific subclasses. Provider-native exceptions (`botocore.ClientError`, `RedisError`, `azure.core.exceptions.*`, `google.api_core.exceptions.*`, and `aiohttp.ClientResponseError` for GCS) are **caught and translated to this hierarchy at the backend boundary** — callers should only ever see cloudrift exceptions.
+All backends raise from one hierarchy in `cloudrift/core/exceptions.py`, rooted at `CloudRiftError` with a per-category base (`StorageError`, `CacheError`, `MessagingError`, `DocumentError`, `SecretError`, `SQLError`, `CryptoError`, `PubSubError`, `EmailError`, `IdentityError`) and specific subclasses. Provider-native exceptions (`botocore.ClientError`, `RedisError`, `azure.core.exceptions.*`, `google.api_core.exceptions.*`, and `aiohttp.ClientResponseError` for GCS) are **caught and translated to this hierarchy at the backend boundary** — callers should only ever see cloudrift exceptions.
 
 Match the *existing* provider's mapping for a category rather than inventing a better one: the GCP Pub/Sub fan-out backend falls back to `PubSubError` (not `PublishError`) on an unclassified publish failure precisely because the SNS backend does, and a caller catching `PublishError` must behave the same on either provider. GCP status mapping is by exception type, not code: `NotFound` → the category's not-found error, `PermissionDenied` → the permission error, and for Cloud KMS `FailedPrecondition` → `CryptoKeyNotFoundError` (a disabled or destroyed key version exists but is unusable — the analog of AWS `KeyUnavailableException`).
 
@@ -128,6 +167,7 @@ Backends hold one long-lived, connection-pooled async client meant to be constru
 | Crypto (KMS) | `get_crypto` | `aws_kms` | `azure_keyvault` | `gcp_kms` | — |
 | Pub/Sub | `get_pubsub` | `sns` | `azure_eventgrid` | `gcp_pubsub` | — |
 | Email | `get_email` | `ses` | `azure_acs` | — (use `smtp`) | `smtp` |
+| Workload identity | `get_workload_verifier` | — (not yet) | `entra` | — (not yet) | — |
 
 ## Known abstraction gaps
 

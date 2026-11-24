@@ -866,6 +866,18 @@ wheels = [
 ]
 
 [[package]]
+name = "ecdsa"
+version = "0.19.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/25/ca/8de7744cb3bc966c85430ca2d0fcaeea872507c6a4cf6e007f7fe269ed9d/ecdsa-0.19.2.tar.gz", hash = "sha256:62635b0ac1ca2e027f82122b5b81cb706edc38cd91c63dda28e4f3455a2bf930", size = 202432, upload-time = "2026-03-26T09:58:17.675Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/79/119091c98e2bf49e24ed9f3ae69f816d715d2904aefa6a2baa039a2ba0b0/ecdsa-0.19.2-py2.py3-none-any.whl", hash = "sha256:840f5dc5e375c68f36c1a7a5b9caad28f95daa65185c9253c0c08dd952bb7399", size = 150818, upload-time = "2026-03-26T09:58:15.808Z" },
+]
+
+[[package]]
 name = "et-xmlfile"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1569,7 +1581,7 @@ wheels = [
 
 [[package]]
 name = "lyzr-cloudrift"
-version = "0.5.1"
+version = "0.6.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -1599,6 +1611,7 @@ all = [
     { name = "oracledb" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pymongo", extra = ["aws"] },
+    { name = "python-jose", extra = ["cryptography"] },
     { name = "redis", extra = ["hiredis"] },
 ]
 aws = [
@@ -1647,6 +1660,7 @@ dev = [
     { name = "pymongo", extra = ["aws"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-jose", extra = ["cryptography"] },
     { name = "ruff" },
 ]
 email = [
@@ -1662,6 +1676,10 @@ gcp = [
     { name = "motor" },
     { name = "pymongo" },
     { name = "redis", extra = ["hiredis"] },
+]
+identity = [
+    { name = "httpx" },
+    { name = "python-jose", extra = ["cryptography"] },
 ]
 sandbox-aws = [
     { name = "aiobotocore" },
@@ -1779,6 +1797,7 @@ requires-dist = [
     { name = "google-cloud-secret-manager", marker = "extra == 'dev'", specifier = ">=2.18.0" },
     { name = "google-cloud-secret-manager", marker = "extra == 'gcp'", specifier = ">=2.18.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.25.0" },
+    { name = "httpx", marker = "extra == 'identity'", specifier = ">=0.25.0" },
     { name = "moto", extras = ["s3", "sqs", "sns", "ses", "secretsmanager", "kms", "server"], marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "motor", marker = "extra == 'all'", specifier = ">=3.3.0" },
     { name = "motor", marker = "extra == 'aws'", specifier = ">=3.3.0" },
@@ -1803,6 +1822,9 @@ requires-dist = [
     { name = "pymongo", extras = ["aws"], marker = "extra == 'dev'", specifier = ">=4.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "python-jose", extras = ["cryptography"], marker = "extra == 'all'", specifier = ">=3.3.0" },
+    { name = "python-jose", extras = ["cryptography"], marker = "extra == 'dev'", specifier = ">=3.3.0" },
+    { name = "python-jose", extras = ["cryptography"], marker = "extra == 'identity'", specifier = ">=3.3.0" },
     { name = "redis", extras = ["hiredis"], marker = "extra == 'all'", specifier = ">=5.0.0" },
     { name = "redis", extras = ["hiredis"], marker = "extra == 'aws'", specifier = ">=5.0.0" },
     { name = "redis", extras = ["hiredis"], marker = "extra == 'azure'", specifier = ">=5.0.0" },
@@ -1810,7 +1832,7 @@ requires-dist = [
     { name = "redis", extras = ["hiredis"], marker = "extra == 'gcp'", specifier = ">=5.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
 ]
-provides-extras = ["aws", "azure", "gcp", "cache", "email", "sandbox-aws", "sandbox-azure", "sandbox-e2b", "sql-postgres", "sql-mysql", "sql-mssql", "sql-oracle", "sql-databricks", "sql", "all", "dev"]
+provides-extras = ["aws", "azure", "gcp", "cache", "email", "identity", "sandbox-aws", "sandbox-azure", "sandbox-e2b", "sql-postgres", "sql-mysql", "sql-mssql", "sql-oracle", "sql-databricks", "sql", "all", "dev"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "fakeredis", specifier = ">=2.35.1" }]
@@ -3200,6 +3222,25 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/82/ed/0301aeeac3e5353ef3d94b6ec08bbcabd04a72018415dcb29e588514bba8/python_dotenv-1.2.2.tar.gz", hash = "sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3", size = 50135, upload-time = "2026-03-01T16:00:26.196Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0b/d7/1959b9648791274998a9c3526f6d0ec8fd2233e4d4acce81bbae76b44b2a/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a", size = 22101, upload-time = "2026-03-01T16:00:25.09Z" },
+]
+
+[[package]]
+name = "python-jose"
+version = "3.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ecdsa" },
+    { name = "pyasn1" },
+    { name = "rsa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c6/77/3a1c9039db7124eb039772b935f2244fbb73fc8ee65b9acf2375da1c07bf/python_jose-3.5.0.tar.gz", hash = "sha256:fb4eaa44dbeb1c26dcc69e4bd7ec54a1cb8dd64d3b4d81ef08d90ff453f2b01b", size = 92726, upload-time = "2025-05-28T17:31:54.288Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d9/c3/0bd11992072e6a1c513b16500a5d07f91a24017c5909b02c72c62d7ad024/python_jose-3.5.0-py2.py3-none-any.whl", hash = "sha256:abd1202f23d34dfad2c3d28cb8617b90acf34132c7afd60abd0b0b7d3cb55771", size = 34624, upload-time = "2025-05-28T17:31:52.802Z" },
+]
+
+[package.optional-dependencies]
+cryptography = [
+    { name = "cryptography" },
 ]
 
 [[package]]

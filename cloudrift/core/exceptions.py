@@ -104,6 +104,28 @@ class PublishError(PubSubError):
     """Raised when a message fails to publish."""
 
 
+# Workload identity exceptions
+class IdentityError(CloudRiftError):
+    """Base exception for workload identity verification."""
+
+
+class IdentityNotConfiguredError(IdentityError):
+    """Raised when a verifier was constructed without enough configuration to
+    verify safely (e.g. an Entra tenant with no accepted audiences)."""
+
+
+class TokenVerificationError(IdentityError):
+    """Raised when a token is invalid, expired, or fails the provider's rules.
+
+    This is always the caller's problem. Kept distinct from
+    IdentityProviderUnavailableError so a service can answer 401 for one and
+    503 for the other rather than conflating a forged token with an outage."""
+
+
+class IdentityProviderUnavailableError(IdentityError):
+    """Raised when the provider's signing keys could not be fetched."""
+
+
 # Email exceptions
 class EmailError(CloudRiftError):
     """Base exception for email operations."""

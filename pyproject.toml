@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lyzr-cloudrift"
-version = "0.5.1"
+version = "0.6.0"
 description = "Cloud-agnostic abstraction for storage, messaging, document databases, cache, secrets, SQL, crypto (KMS), pub/sub, email, and code sandboxes across AWS, Azure, and GCP"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,8 @@ keywords = [
     "cloud", "aws", "azure", "gcp", "s3", "blob", "gcs", "sqs", "servicebus",
     "documentdb", "cosmosdb", "firestore", "redis", "elasticache", "memorystore",
     "cache", "secrets", "keyvault", "secret-manager", "sns", "eventgrid",
-    "pubsub", "kms", "email", "ses", "smtp", "sandbox", "code-execution",
+    "pubsub", "kms", "email", "ses", "smtp",
+    "identity", "workload-identity", "entra", "oidc", "managed-identity", "sandbox", "code-execution",
     "microvm", "e2b",
 ]
 classifiers = [
@@ -78,6 +79,12 @@ cache = [
 email = [
     "aiosmtplib>=3.0",        # raw SMTP backend
 ]
+# Workload identity token verification (OIDC JWT + JWKS fetch). No cloud SDK:
+# the workload gets its own token from its platform, and this only verifies it.
+identity = [
+    "python-jose[cryptography]>=3.3.0",
+    "httpx>=0.25.0",
+]
 sandbox-aws = [
     "aiobotocore>=3.9.1",     # control plane: Lambda MicroVMs (RunMicrovm, tokens, lifecycle)
     "aiohttp>=3.14.3",        # data plane: per-microVM HTTPS exec endpoint
@@ -139,6 +146,7 @@ all = [
     "azure-communication-email>=1.0.0",
     "redis[hiredis]>=5.0.0",
     "aiosmtplib>=3.0",
+    "python-jose[cryptography]>=3.3.0",
     "psycopg[binary]>=3.1",
     "mysql-connector-python>=8.2",
     "aioodbc>=0.4",
@@ -161,6 +169,7 @@ dev = [
     "google-cloud-kms>=2.21.0",
     "fakeredis>=2.20.0",
     "httpx>=0.25.0",
+    "python-jose[cryptography]>=3.3.0",
     "ruff>=0.4.0",
     "aiosmtplib>=3.0",
     "azure-communication-email>=1.0.0",
